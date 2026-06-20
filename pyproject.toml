@@ -58,8 +58,8 @@ spellcheck = ["autocorrect>=2.0"]
 #   pip install mempalace[dml]       — DirectML (Windows AMD/Intel/NVIDIA)
 #   pip install mempalace[coreml]    — macOS Neural Engine
 # After install, set MEMPALACE_EMBEDDING_DEVICE=cuda|dml|coreml (or "auto").
-gpu = ["onnxruntime-gpu>=1.16"]
-dml = ["onnxruntime-directml>=1.16"]
+gpu = ["onnxruntime-gpu>=1.16; sys_platform != 'darwin'"]
+dml = ["onnxruntime-directml>=1.16; sys_platform == 'win32'"]
 coreml = ["onnxruntime>=1.16"]
 
 [dependency-groups]
