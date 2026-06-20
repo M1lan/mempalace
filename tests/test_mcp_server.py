@@ -9,6 +9,7 @@ via monkeypatch to avoid touching real data.
 from datetime import datetime
 import json
 import os
+from types import SimpleNamespace
 import subprocess
 import sys
 from unittest.mock import MagicMock
@@ -537,6 +538,20 @@ class TestHandleRequest:
         assert "mempalace_add_drawer" in names
         assert "mempalace_kg_add" in names
 
+    def test_no_tool_schema_uses_top_level_combinator(self):
+        """Anthropic's Messages API rejects a tool whose input schema has a
+        top-level anyOf/oneOf/allOf and drops the entire tools array with a
+        400, killing the session (#1711). Cross-tool constraints must be
+        enforced at dispatch instead.
+        """
+        from mempalace.mcp_server import handle_request
+
+        resp = handle_request({"method": "tools/list", "id": 2, "params": {}})
+        for tool in resp["result"]["tools"]:
+            schema = tool["inputSchema"]
+            for keyword in ("anyOf", "oneOf", "allOf"):
+                assert keyword not in schema, f"{tool['name']} schema has top-level {keyword}"
+
     def test_null_arguments_does_not_hang(self, monkeypatch, config, palace_path, seeded_kg):
         """Sending arguments: null should return a result, not hang (#394)."""
         _patch_mcp_server(monkeypatch, config, seeded_kg)
@@ -694,6 +709,75 @@ class TestReadTools:
         assert result["total_drawers"] == 4
         assert "project" in result["wings"]
         assert "notes" in result["wings"]
+
+    def test_status_sqlite_exact_backend_has_no_hnsw_fields(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        import mempalace.backends.embedding_wrapper as embedding_wrapper
+        from mempalace.palace import get_collection
+
+        monkeypatch.setenv("MEMPALACE_BACKEND_EXPLICIT", "sqlite_exact")
+        monkeypatch.setattr(
+            embedding_wrapper,
+            "_embed_texts",
+            lambda texts: [[float(len(text)), 1.0] for text in texts],
+        )
+        col = get_collection(palace_path, create=True)
+        col.add(
+            ids=["drawer_sqlite"],
+            documents=["verbatim sqlite drawer"],
+            metadatas=[{"wing": "w", "room": "r"}],
+        )
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_collection_cache", None)
+        result = mcp_server.tool_status()
+
+        assert result["backend"] == "sqlite_exact"
+        assert result["total_drawers"] == 1
+        assert "hnsw_capacity" not in result
+        assert result.get("vector_disabled") is not True
+
+    def test_status_qdrant_backend_has_no_hnsw_fields(self, monkeypatch, config, palace_path, kg):
+        from mempalace.backends import GetResult
+
+        monkeypatch.setenv("MEMPALACE_BACKEND_EXPLICIT", "qdrant")
+        monkeypatch.setenv("MEMPALACE_BACKEND", "qdrant")
+        with open(os.path.join(palace_path, "qdrant_backend.json"), "w", encoding="utf-8") as f:
+            json.dump({"backend": "qdrant"}, f)
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        class _FakeQdrantCollection:
+            def count(self):
+                return 2
+
+            def get(self, **_kwargs):
+                return GetResult(
+                    ids=["q1", "q2"],
+                    documents=[],
+                    metadatas=[
+                        {"wing": "project", "room": "backend"},
+                        {"wing": "project", "room": "api"},
+                    ],
+                )
+
+        monkeypatch.setattr(mcp_server, "_collection_cache", None)
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+        monkeypatch.setattr(
+            mcp_server, "_get_collection", lambda create=False: _FakeQdrantCollection()
+        )
+
+        result = mcp_server.tool_status()
+
+        assert result["backend"] == "qdrant"
+        assert result["total_drawers"] == 2
+        assert result["wings"] == {"project": 2}
+        assert "hnsw_capacity" not in result
+        assert result.get("vector_disabled") is not True
 
     def test_status_handles_none_metadata_without_partial(
         self, monkeypatch, config, palace_path, kg
@@ -985,6 +1069,38 @@ class TestSearchTool:
         assert "results" in result
         assert result.get("index_recovered") is True
 
+    def test_search_retry_preserves_collection_name(self, monkeypatch, config, kg):
+        """Retry path must query the same configured collection both times."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_config",
+            SimpleNamespace(
+                palace_path=config.palace_path,
+                collection_name="custom_drawers",
+            ),
+        )
+        seen_collection_names = []
+
+        def fake_search(*args, **kwargs):
+            seen_collection_names.append(kwargs.get("collection_name"))
+            if len(seen_collection_names) == 1:
+                return {
+                    "error": "Search error: Error executing plan: Internal error: Error finding id"
+                }
+            return {"results": [{"text": "ok", "wing": "w", "room": "r"}]}
+
+        monkeypatch.setattr(mcp_server, "search_memories", fake_search)
+        monkeypatch.setattr(mcp_server, "_force_chroma_cache_reset", lambda: None)
+        monkeypatch.setattr(mcp_server.time, "sleep", lambda _: None)
+
+        result = mcp_server.tool_search(query="anything", wing="wing_api")
+
+        assert "results" in result
+        assert seen_collection_names == ["custom_drawers", "custom_drawers"]
+
     def test_search_does_not_retry_on_non_transient_error(self, monkeypatch, config, kg):
         """Validation / unrelated errors must not trigger the retry path."""
         _patch_mcp_server(monkeypatch, config, kg)
@@ -1024,6 +1140,34 @@ class TestSearchTool:
         assert calls["n"] == 2
         assert "error" in result
         assert "index_recovered" not in result
+
+    def test_search_retries_once_on_stale_index_error(self, monkeypatch, config, kg):
+        """Stale-index errors should trigger one cache-reset retry."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        calls = {"n": 0}
+        reset_calls = {"n": 0}
+
+        def fake_search(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"error": "Search error: stale-index detected; retry recommended"}
+            return {"results": [{"text": "ok", "wing": "w", "room": "r"}]}
+
+        def fake_reset():
+            reset_calls["n"] += 1
+
+        monkeypatch.setattr(mcp_server, "search_memories", fake_search)
+        monkeypatch.setattr(mcp_server, "_force_chroma_cache_reset", fake_reset)
+        monkeypatch.setattr(mcp_server.time, "sleep", lambda _: None)
+
+        result = mcp_server.tool_search(query="anything")
+
+        assert calls["n"] == 2
+        assert reset_calls["n"] == 1
+        assert "results" in result
+        assert result.get("index_recovered") is True
 
     def test_list_drawers_rejects_invalid_wing(self, monkeypatch, config, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -1094,6 +1238,63 @@ class TestWriteTools:
         result2 = tool_add_drawer(wing="w", room="r", content=content)
         assert result2["success"] is True
         assert result2["reason"] == "already_exists"
+
+    def test_add_drawer_returns_failure_when_idempotency_precheck_raises(
+        self, monkeypatch, config, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        mock_col = MagicMock()
+        mock_col.get.side_effect = RuntimeError("precheck boom")
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: mock_col)
+
+        result = mcp_server.tool_add_drawer("w", "r", "content")
+
+        assert result["success"] is False
+        assert "Idempotency check failed before write" in result["error"]
+        assert "precheck boom" in result["error"]
+
+    def test_add_drawer_does_not_upsert_when_idempotency_precheck_raises(
+        self, monkeypatch, config, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        mock_col = MagicMock()
+        mock_col.get.side_effect = RuntimeError("precheck boom")
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: mock_col)
+
+        result = mcp_server.tool_add_drawer("w", "r", "content")
+
+        assert result["success"] is False
+        mock_col.upsert.assert_not_called()
+
+    def test_add_drawer_treats_dict_like_precheck_hit_as_already_exists(
+        self, monkeypatch, config, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["existing-drawer"]}
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: mock_col)
+
+        result = mcp_server.tool_add_drawer("w", "r", "content")
+
+        assert result["success"] is True
+        assert result["reason"] == "already_exists"
+        mock_col.upsert.assert_not_called()
+
+    def test_get_result_ids_normalizes_none_to_empty_list(self):
+        from mempalace import mcp_server
+
+        class DictLikeResult:
+            def get(self, key, default=None):
+                return None
+
+        assert mcp_server._get_result_ids({"ids": None}) == []
+        assert mcp_server._get_result_ids(DictLikeResult()) == []
 
     def test_add_drawer_fails_when_readback_misses(self, monkeypatch, config, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -1371,7 +1572,14 @@ class TestWriteTools:
         verbatim, and both hyphen and underscore queries find the result."""
         from mempalace import mcp_server, palace_graph
 
-        monkeypatch.setattr(palace_graph, "_TUNNEL_FILE", str(tmp_path / "tunnels.json"))
+        tunnel_file = tmp_path / "tunnels.json"
+        monkeypatch.setattr(palace_graph, "_get_tunnel_file", lambda *a, **kw: str(tunnel_file))
+        monkeypatch.setattr(
+            palace_graph,
+            "_legacy_tunnel_file",
+            lambda: str(tmp_path / "legacy-tunnels.json"),
+        )
+        monkeypatch.setattr(palace_graph, "_get_collection", lambda *a, **kw: None)
 
         t = mcp_server.tool_create_tunnel(
             source_wing="other-wing",
@@ -1407,6 +1615,318 @@ class TestWriteTools:
         )
 
         assert result == {"error": msg}
+
+    # ── hallway MCP tools (mirror the tunnel pattern) ──
+
+    def _seed_hallways(self, monkeypatch, tmp_path):
+        """Point hallways resolvers at a tmp file and seed two records."""
+        from mempalace import hallways
+
+        hallway_file = tmp_path / "hallways.json"
+        monkeypatch.setattr(hallways, "_get_hallway_file", lambda *a, **kw: str(hallway_file))
+        monkeypatch.setattr(
+            hallways,
+            "_legacy_hallway_file",
+            lambda: str(tmp_path / "legacy-hallways.json"),
+        )
+        seeded = [
+            {
+                "id": "hallway_wing_a_X_Y_aaaa",
+                "wing": "wing_a",
+                "entity_a": "X",
+                "entity_b": "Y",
+                "co_occurrence_count": 3,
+                "rooms": ["room1"],
+            },
+            {
+                "id": "hallway_wing_b_X_Z_bbbb",
+                "wing": "wing_b",
+                "entity_a": "X",
+                "entity_b": "Z",
+                "co_occurrence_count": 1,
+                "rooms": ["room2"],
+            },
+        ]
+        hallways._save_hallways(seeded)
+        return seeded
+
+    def test_tool_list_hallways_returns_all_without_filter(self, monkeypatch, tmp_path):
+        """tool_list_hallways with no wing returns every record."""
+        from mempalace import mcp_server
+
+        seeded = self._seed_hallways(monkeypatch, tmp_path)
+        result = mcp_server.tool_list_hallways()
+        assert isinstance(result, list)
+        assert len(result) == len(seeded)
+        ids = {h["id"] for h in result}
+        assert ids == {h["id"] for h in seeded}
+
+    def test_tool_list_hallways_filters_by_wing(self, monkeypatch, tmp_path):
+        """tool_list_hallways with wing returns only that wing's records."""
+        from mempalace import mcp_server
+
+        self._seed_hallways(monkeypatch, tmp_path)
+        result = mcp_server.tool_list_hallways(wing="wing_a")
+        assert len(result) == 1
+        assert result[0]["wing"] == "wing_a"
+
+    def test_tool_list_hallways_rejects_invalid_wing_name(self, monkeypatch, tmp_path):
+        """Invalid wing names go through _sanitize_optional_name and return a
+        structured error rather than crashing — mirrors tool_list_tunnels."""
+        from mempalace import mcp_server
+
+        self._seed_hallways(monkeypatch, tmp_path)
+        # Forward-slash is not a valid name character per sanitize_name.
+        result = mcp_server.tool_list_hallways(wing="wing/with/slashes")
+        assert isinstance(result, dict)
+        assert "error" in result
+
+    def test_tool_delete_hallway_removes_existing_record(self, monkeypatch, tmp_path):
+        """tool_delete_hallway removes the record and returns {deleted: True}."""
+        from mempalace import mcp_server
+
+        seeded = self._seed_hallways(monkeypatch, tmp_path)
+        target_id = seeded[0]["id"]
+        result = mcp_server.tool_delete_hallway(hallway_id=target_id)
+        assert result == {"deleted": True}
+        remaining = mcp_server.tool_list_hallways()
+        assert target_id not in {h["id"] for h in remaining}
+
+    def test_tool_delete_hallway_unknown_id_returns_false(self, monkeypatch, tmp_path):
+        """Deleting an ID that doesn't exist returns {deleted: False} without error."""
+        from mempalace import mcp_server
+
+        self._seed_hallways(monkeypatch, tmp_path)
+        result = mcp_server.tool_delete_hallway(hallway_id="hallway_does_not_exist")
+        assert result == {"deleted": False}
+
+    def test_tool_delete_hallway_requires_string_id(self):
+        """Missing or non-string hallway_id surfaces a structured error."""
+        from mempalace import mcp_server
+
+        assert mcp_server.tool_delete_hallway(hallway_id="") == {"error": "hallway_id is required"}
+        assert mcp_server.tool_delete_hallway(hallway_id=None) == {
+            "error": "hallway_id is required"
+        }
+
+    def test_hallway_tools_registered_in_tools_registry(self):
+        """Both new tools must appear in the public TOOLS registry so MCP clients can dispatch them."""
+        from mempalace import mcp_server
+
+        assert "mempalace_list_hallways" in mcp_server.TOOLS
+        assert "mempalace_delete_hallway" in mcp_server.TOOLS
+        assert (
+            mcp_server.TOOLS["mempalace_list_hallways"]["handler"] is mcp_server.tool_list_hallways
+        )
+        assert (
+            mcp_server.TOOLS["mempalace_delete_hallway"]["handler"]
+            is mcp_server.tool_delete_hallway
+        )
+
+    def test_add_drawer_normal_content_single_drawer(self, monkeypatch, config, palace_path, kg):
+        """Regression catch: content below CHUNK_SIZE produces exactly
+        one drawer with ``chunks == 1``. Pre-#1539 contract preserved."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer
+
+        result = tool_add_drawer(wing="w", room="r", content="Short content well under chunk_size.")
+        assert result["success"] is True
+        assert result["chunks"] == 1
+        assert "chunk_ids" not in result
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.count() == 1
+        assert col.get()["ids"] == [result["drawer_id"]]
+
+    def test_add_drawer_oversized_content_chunked(self, monkeypatch, config, palace_path, kg):
+        """Regression for #1539: content far above chunk_size must be
+        sliced into bounded per-chunk drawers, each linked by a
+        ``parent_drawer_id`` metadata field. No stored document may
+        exceed the configured chunk_size."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer
+
+        oversized = "X" * 10000
+        result = tool_add_drawer(wing="w", room="r", content=oversized)
+        assert result["success"] is True
+        assert result["chunks"] > 1
+        assert "chunk_ids" in result and len(result["chunk_ids"]) == result["chunks"]
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        stored = col.get()
+        max_doc = max(len(d) for d in stored["documents"])
+        assert max_doc <= config.chunk_size, (
+            f"no stored document may exceed chunk_size={config.chunk_size}; got max={max_doc}"
+        )
+        # Chroma does not guarantee insertion order on a bare ``get()``;
+        # sort by ``chunk_index`` before joining so the verbatim check
+        # is deterministic.
+        ordered = sorted(
+            zip(stored["metadatas"], stored["documents"]),
+            key=lambda pair: pair[0]["chunk_index"],
+        )
+        assert "".join(doc for _meta, doc in ordered) == oversized
+        parent_ids = {m.get("parent_drawer_id") for m in stored["metadatas"]}
+        assert parent_ids == {result["drawer_id"]}, (
+            f"all chunks must share one parent_drawer_id; got {parent_ids}"
+        )
+
+    def test_add_drawer_oversized_idempotency_skips_duplicate_chunk_writes(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Re-calling with identical oversized content must not duplicate
+        any drawer. Idempotency on the chunked path probes the last
+        chunk id (its presence implies the whole batch committed) and
+        also the legacy logical drawer_id so a pre-#1539 single-row
+        write under the same logical id does not get co-resident chunk
+        siblings on the next call."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer
+
+        oversized = "Y" * 5000
+        r1 = tool_add_drawer(wing="w", room="r", content=oversized)
+        assert r1["success"] is True and r1["chunks"] > 1
+        r2 = tool_add_drawer(wing="w", room="r", content=oversized)
+        assert r2["success"] is True
+        assert r2.get("reason") == "already_exists"
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.count() == r1["chunks"]
+        # The probe must succeed against the last chunk id (atomicity
+        # signal), and no row must be stored under the logical id.
+        last_chunk = r1["chunk_ids"][-1]
+        assert col.get(ids=[last_chunk])["ids"] == [last_chunk]
+        assert col.get(ids=[r1["drawer_id"]])["ids"] == []
+
+    def test_add_drawer_chunk_metadata_carries_parent_link(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Every chunk produced from oversized content must carry both
+        ``chunk_index`` (0..N-1) and ``parent_drawer_id`` matching the
+        logical group handle returned to the caller."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer
+
+        result = tool_add_drawer(wing="w", room="r", content="Q" * 3500)
+        assert result["success"] is True and result["chunks"] > 1
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        stored = col.get()
+        indices = sorted(m["chunk_index"] for m in stored["metadatas"])
+        assert indices == list(range(len(indices)))
+        for meta in stored["metadatas"]:
+            assert meta.get("parent_drawer_id") == result["drawer_id"]
+
+    def test_add_drawer_boundary_exact_chunk_size_stays_single(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """The ``<= chunk_size`` predicate must include the boundary:
+        content of exactly chunk_size chars stays a single drawer, not
+        an off-by-one chunked write."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer
+
+        boundary = "Z" * config.chunk_size
+        result = tool_add_drawer(wing="w", room="r", content=boundary)
+        assert result["success"] is True
+        assert result["chunks"] == 1
+        assert "chunk_ids" not in result
+
+
+def test_add_drawer_chunked_logical_id_fetches_deletes_and_lists_as_one(
+    monkeypatch, config, palace_path, kg
+):
+    """Chunk rows are internal storage; MCP tools operate on the logical id."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    _client, _col = _get_collection(palace_path, create=True)
+    del _client
+
+    from mempalace.mcp_server import (
+        tool_add_drawer,
+        tool_delete_drawer,
+        tool_get_drawer,
+        tool_list_drawers,
+    )
+
+    result = tool_add_drawer(wing="w", room="r", content="P" * 4000)
+
+    assert result["success"] is True
+    assert result["chunks"] > 1
+
+    logical_id = result["drawer_id"]
+
+    fetched = tool_get_drawer(logical_id)
+    assert fetched["drawer_id"] == logical_id
+    assert fetched["content"] == "P" * 4000
+    assert fetched["chunks"] == result["chunks"]
+    assert fetched["chunk_ids"] == result["chunk_ids"]
+
+    listed = tool_list_drawers(wing="w", room="r")
+    assert listed["total"] == 1
+    assert listed["count"] == 1
+    assert listed["drawers"][0]["drawer_id"] == logical_id
+    assert listed["drawers"][0]["chunks"] == result["chunks"]
+
+    deleted = tool_delete_drawer(logical_id)
+    assert deleted["success"] is True
+    assert deleted["chunks_deleted"] == result["chunks"]
+
+    missing = tool_get_drawer(logical_id)
+    assert "error" in missing
+    assert "not found" in missing["error"].lower()
+
+
+def test_update_drawer_chunked_logical_id_rewrites_group(monkeypatch, config, palace_path, kg):
+    """Updating the returned logical id rewrites the underlying chunk group."""
+    _patch_mcp_server(monkeypatch, config, kg)
+    _client, _col = _get_collection(palace_path, create=True)
+    del _client
+
+    from mempalace.mcp_server import (
+        tool_add_drawer,
+        tool_get_drawer,
+        tool_list_drawers,
+        tool_update_drawer,
+    )
+
+    result = tool_add_drawer(wing="old", room="old_room", content="A" * 2600)
+    assert result["success"] is True
+    assert result["chunks"] > 1
+
+    logical_id = result["drawer_id"]
+
+    updated = tool_update_drawer(
+        logical_id,
+        content="B" * 1800,
+        wing="new",
+        room="new_room",
+    )
+
+    assert updated["success"] is True
+    assert updated["drawer_id"] == logical_id
+
+    fetched = tool_get_drawer(logical_id)
+    assert fetched["drawer_id"] == logical_id
+    assert fetched["content"] == "B" * 1800
+    assert fetched["wing"] == "new"
+    assert fetched["room"] == "new_room"
+
+    listed = tool_list_drawers(wing="new", room="new_room")
+    assert listed["total"] == 1
+    assert listed["drawers"][0]["drawer_id"] == logical_id
 
 
 # ── KG Tools ────────────────────────────────────────────────────────────
@@ -1938,6 +2458,81 @@ class TestDiaryTools:
         assert w1["agent"] == "claude"
         assert w2["agent"] == "claude"
 
+    # ── #1539: oversized-entry chunking ────────────────────────────
+
+    def test_diary_write_normal_entry_single_drawer(self, monkeypatch, config, palace_path, kg):
+        """Regression catch: a normal entry (< CHUNK_SIZE) must produce
+        exactly one drawer with ``chunks == 1`` in the result. Existing
+        pre-#1539 behaviour preserved for the common path."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_diary_write
+
+        r = tool_diary_write(
+            agent_name="TestAgent",
+            entry="A normal-length entry that fits comfortably under chunk_size.",
+            topic="general",
+        )
+        assert r["success"] is True
+        assert r["chunks"] == 1
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.count() == 1
+
+    def test_diary_write_oversized_entry_chunked(self, monkeypatch, config, palace_path, kg):
+        """Regression for #1539: an entry far above CHUNK_SIZE must be
+        sliced into bounded per-chunk drawers, each linked by a
+        ``parent_entry_id`` metadata field. No single document stored
+        may exceed CHUNK_SIZE."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_diary_write
+
+        # 5000 chars: well above CHUNK_SIZE=800. Expected chunks: ceil(5000/800) = 7.
+        oversized = "Z" * 5000
+        r = tool_diary_write(agent_name="TestAgent", entry=oversized, topic="general")
+
+        assert r["success"] is True
+        assert r["chunks"] > 1, f"oversized entry must produce >1 chunks; got {r['chunks']}"
+        assert "chunk_ids" in r and len(r["chunk_ids"]) == r["chunks"]
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        stored = col.get()
+        assert all(len(d) <= 800 for d in stored["documents"]), (
+            f"no stored document may exceed CHUNK_SIZE=800; "
+            f"got max={max(len(d) for d in stored['documents'])}"
+        )
+        joined = "".join(stored["documents"])
+        assert joined == oversized, "joined chunks must equal original entry verbatim"
+
+        parent_ids = {m.get("parent_entry_id") for m in stored["metadatas"]}
+        assert len(parent_ids) == 1 and None not in parent_ids, (
+            f"all chunks must share one parent_entry_id; got {parent_ids}"
+        )
+
+    def test_diary_write_chunk_index_metadata(self, monkeypatch, config, palace_path, kg):
+        """Regression for #1539: each oversized-entry chunk must carry a
+        ``chunk_index`` metadata field that runs 0, 1, 2, ... in order."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_diary_write
+
+        oversized = "Q" * 3500  # ~5 chunks at CHUNK_SIZE=800
+        r = tool_diary_write(agent_name="TestAgent", entry=oversized, topic="general")
+        assert r["success"] is True and r["chunks"] > 1
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        stored = col.get()
+        indices = sorted(m["chunk_index"] for m in stored["metadatas"])
+        assert indices == list(range(len(indices))), (
+            f"chunk_index must be 0..N-1 contiguous; got {indices}"
+        )
+
 
 # ── Cache Invalidation (inode/mtime) ──────────────────────────────────
 
@@ -2007,10 +2602,20 @@ class TestCacheInvalidation:
         if os.path.isfile(db_file):
             os.remove(db_file)
 
+        make_client_calls = []
+
+        def fail_if_make_client_called(path):
+            make_client_calls.append(path)
+            raise AssertionError("_get_collection(create=False) should not open missing Chroma DB")
+
+        monkeypatch.setattr(mcp_server.ChromaBackend, "make_client", fail_if_make_client_called)
+
         # Cache should be invalidated; _get_collection returns None
         # because the backend can't open a missing DB without create=True
-        mcp_server._get_collection()
+        assert mcp_server._get_collection() is None
         # The key assertion: the old cached collection was dropped
+        assert make_client_calls == []
+        assert mcp_server._collection_cache is None
         assert mcp_server._palace_db_inode == 0
         assert mcp_server._palace_db_mtime == 0.0
 
@@ -2056,7 +2661,69 @@ class TestCacheInvalidation:
 
         result = mcp_server.tool_reconnect()
         assert result["success"] is True
-        close_palace.assert_called_once_with(config.palace_path)
+        closed_ref = close_palace.call_args.args[0]
+        assert closed_ref.local_path == config.palace_path
+
+    def test_reconnect_closes_selected_non_chroma_backend(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        monkeypatch.setenv("MEMPALACE_BACKEND_EXPLICIT", "sqlite_exact")
+        from mempalace import mcp_server, palace
+
+        closed = []
+
+        class _FakeBackend:
+            def close_palace(self, path):
+                closed.append(path)
+
+        class _FakeCol:
+            def count(self):
+                return 3
+
+        monkeypatch.setattr(palace, "get_backend_for_palace", lambda _path: _FakeBackend())
+        monkeypatch.setattr(mcp_server, "_is_chroma_backend", lambda: False)
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: _FakeCol())
+
+        result = mcp_server.tool_reconnect()
+
+        assert result["success"] is True
+        assert result["drawers"] == 3
+        assert len(closed) == 1
+        assert closed[0].local_path == palace_path
+
+    def test_reconnect_closes_previously_cached_backend(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import backends, mcp_server, palace
+
+        closed = []
+
+        class _SelectedBackend:
+            name = "sqlite_exact"
+
+            def close_palace(self, ref):
+                closed.append(("selected", ref.local_path))
+
+        class _CachedBackend:
+            name = "chroma"
+
+            def close_palace(self, ref):
+                closed.append(("cached", ref.local_path))
+
+        class _FakeCol:
+            def count(self):
+                return 3
+
+        monkeypatch.setattr(palace, "get_backend_for_palace", lambda _path: _SelectedBackend())
+        monkeypatch.setattr(backends, "get_backend", lambda _name: _CachedBackend())
+        monkeypatch.setattr(mcp_server, "_collection_cache_backend", "chroma")
+        monkeypatch.setattr(mcp_server, "_is_chroma_backend", lambda: False)
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: _FakeCol())
+
+        result = mcp_server.tool_reconnect()
+
+        assert result["success"] is True
+        assert closed == [("selected", palace_path), ("cached", palace_path)]
 
     def test_get_collection_create_true_avoids_get_or_create_on_reopen(
         self, monkeypatch, config, palace_path, kg
@@ -2225,6 +2892,66 @@ class TestCacheInvalidation:
         assert col is None
 
 
+class TestImportKillSwitchSafety:
+    """Importing mcp_server must not recreate ~/.mempalace (#1676).
+
+    The module-level WAL setup used to ``mkdir(parents=True)`` at import,
+    recreating ``~/.mempalace`` even after the user removed it as the
+    documented kill-switch gesture (``_palace_root_exists()``, #1305),
+    silently re-arming the autosave/mining hooks. WAL creation is now
+    deferred to the first actual write.
+    """
+
+    def test_import_does_not_recreate_palace_root(self, tmp_path):
+        """import mempalace.mcp_server must not create ~/.mempalace.
+
+        Runs in a fresh subprocess with HOME pointed at tmp_path so the
+        assertion targets a clean filesystem, independent of conftest's
+        session-level HOME patch.
+        """
+        palace_root = tmp_path / ".mempalace"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("MEMPAL")}
+        env["HOME"] = str(tmp_path)
+        env["USERPROFILE"] = str(tmp_path)
+        result = subprocess.run(
+            [sys.executable, "-c", "import mempalace.mcp_server"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"import failed: {result.stderr}"
+        assert not palace_root.exists(), (
+            f"importing mcp_server recreated {palace_root} as a side effect, "
+            "defeating the _palace_root_exists() kill-switch (#1676)"
+        )
+
+    def test_wal_log_creates_dir_lazily_on_first_write(self, tmp_path, monkeypatch):
+        """_wal_log creates its directory on first use.
+
+        Proves the deferred setup still works (defers WAL creation to write
+        time, does not disable it) and preserves the WAL permission bits.
+        """
+        from mempalace import mcp_server
+
+        wal_file = tmp_path / "fresh" / "wal" / "write_log.jsonl"
+        assert not wal_file.parent.exists()
+        monkeypatch.setattr(mcp_server, "_WAL_FILE", wal_file)
+
+        mcp_server._wal_log("test_op", {"safe": "ok"})
+
+        assert wal_file.exists(), "lazy WAL init did not create the log on first write"
+        entry = json.loads(wal_file.read_text().strip())
+        assert entry["operation"] == "test_op"
+        assert entry["params"]["safe"] == "ok"
+
+        # Permission bits the refactor must preserve (POSIX only; Windows
+        # ignores chmod and the code swallows NotImplementedError).
+        if sys.platform != "win32":
+            assert wal_file.stat().st_mode & 0o777 == 0o600
+            assert wal_file.parent.stat().st_mode & 0o777 == 0o700
+
+
 class TestKGLazyCache:
     """Lazy per-path KnowledgeGraph cache (issue #1136)."""
 
@@ -2317,6 +3044,115 @@ class TestKGLazyCache:
         query_a = mcp_server.tool_kg_query(entity="alice_secret")
         assert query_a.get("count", 0) >= 1, f"tenant A lost its own fact: {query_a}"
 
+
+# ── Structured error codes + MineAlreadyRunning (#1552) ─────────────────
+
+
+class TestStructuredErrors:
+    """Verify that _internal_tool_error and MineAlreadyRunning return
+    machine-readable structured data (#1552)."""
+
+    def test_internal_tool_error_without_exc_has_no_data_field(self):
+        """Backward-compat: callers that omit exc still get a valid error dict."""
+        from mempalace.mcp_server import _internal_tool_error
+
+        try:
+            raise ValueError("test error")
+        except ValueError:
+            resp = _internal_tool_error("req-1", "mempalace_search")
+
+        assert resp["jsonrpc"] == "2.0"
+        assert resp["id"] == "req-1"
+        err = resp["error"]
+        assert err["code"] == -32000
+        assert err["message"] == "Internal tool error"
+        assert "data" not in err
+
+    def test_internal_tool_error_with_exc_includes_structured_data(self):
+        """When exc is supplied, the error body must include data.error_class
+        and data.message so callers can distinguish error types (#1552)."""
+        from mempalace.mcp_server import _internal_tool_error
+
+        exc = RuntimeError("chromadb cold init wedge")
+        try:
+            raise exc
+        except RuntimeError:
+            resp = _internal_tool_error("req-2", "mempalace_add_drawer", exc)
+
+        err = resp["error"]
+        assert err["code"] == -32000
+        assert "data" in err
+        assert err["data"]["error_class"] == "RuntimeError"
+        assert "chromadb cold init wedge" in err["data"]["message"]
+
+    def test_internal_tool_error_exception_dispatch_passes_exc(self, monkeypatch):
+        """handle_request's Exception branch must pass exc to _internal_tool_error."""
+        from mempalace import mcp_server
+
+        captured = {}
+
+        def fake_handler(**kwargs):
+            raise OSError("fake disk error")
+
+        fake_tool_entry = {
+            "handler": fake_handler,
+            "input_schema": {"type": "object", "properties": {}},
+        }
+        monkeypatch.setattr(
+            mcp_server,
+            "TOOLS",
+            {"mempalace_fake": fake_tool_entry},
+        )
+
+        original = mcp_server._internal_tool_error
+
+        def spy_error(req_id, tool_name, exc=None):
+            captured["exc"] = exc
+            return original(req_id, tool_name, exc)
+
+        monkeypatch.setattr(mcp_server, "_internal_tool_error", spy_error)
+
+        req = {
+            "jsonrpc": "2.0",
+            "id": "r1",
+            "method": "tools/call",
+            "params": {"name": "mempalace_fake", "arguments": {}},
+        }
+        resp = mcp_server.handle_request(req)
+        assert resp["error"]["code"] == -32000
+        assert isinstance(captured.get("exc"), OSError)
+        assert "data" in resp["error"]
+        assert resp["error"]["data"]["error_class"] == "OSError"
+
+    def test_tool_sync_mine_already_running_returns_error_class(self, monkeypatch, tmp_path):
+        """tool_sync MineAlreadyRunning path returns error_class: LockHeldByOtherProcess."""
+        from mempalace import mcp_server
+        from mempalace.palace import MineAlreadyRunning
+
+        cfg = MagicMock()
+        cfg.palace_path = str(tmp_path / "palace")
+        monkeypatch.setattr(mcp_server, "_config", cfg)
+        monkeypatch.setattr(mcp_server, "_get_kg", lambda *a, **kw: MagicMock())
+
+        def _raise_locked(*args, **kwargs):
+            raise MineAlreadyRunning("pid=12345")
+
+        import mempalace.sync as sync_mod
+
+        monkeypatch.setattr(sync_mod, "sync_palace", _raise_locked, raising=False)
+
+        result = mcp_server.tool_sync()
+        assert result["success"] is False
+        assert "another mine is in progress" in result["error"]
+        assert result.get("error_class") == "LockHeldByOtherProcess"
+
+    def test_mcp_idle_timeout_invalid_env_disables_watchdog(self, monkeypatch):
+        """Invalid MEMPALACE_MCP_IDLE_HOURS disables idle auto-exit."""
+        from mempalace import mcp_server
+
+        monkeypatch.setenv("MEMPALACE_MCP_IDLE_HOURS", "not-a-float")
+        assert mcp_server._mcp_idle_timeout_secs() == 0.0
+
     def test_cache_thread_safe(self, tmp_path, monkeypatch):
         """Concurrent _get_kg() for the same path yields one instance."""
         import concurrent.futures
@@ -2374,6 +3210,57 @@ class TestKGLazyCache:
         mcp_server.tool_reconnect()
 
         assert mcp_server._kg_by_path == {}
+
+    def test_tool_reconnect_rearms_quarantine_gate(self, monkeypatch):
+        """``tool_reconnect`` must clear the per-process quarantine gate so
+        HNSW safety checks re-run on the next open (#1573)."""
+        from mempalace import mcp_server
+        from mempalace.backends.chroma import ChromaBackend
+
+        palace_path = "/test/palace/quarantine_rearm"
+        gate = {palace_path}
+        monkeypatch.setattr(ChromaBackend, "_quarantined_paths", gate)
+        monkeypatch.setattr(mcp_server, "_config", type("C", (), {"palace_path": palace_path})())
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda: None)
+
+        mcp_server.tool_reconnect()
+
+        assert palace_path not in gate, (
+            "tool_reconnect should clear quarantine gate for the palace path"
+        )
+
+    def test_get_client_rearms_quarantine_on_reconnect(self, monkeypatch, config, palace_path, kg):
+        """``_get_client`` must clear the quarantine gate before calling
+        ``make_client`` so HNSW safety checks re-run on reconnect (#1573)."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+        from mempalace.backends.chroma import ChromaBackend
+
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+
+        mcp_server._get_collection()
+
+        assert config.palace_path in ChromaBackend._quarantined_paths
+
+        old_mtime = mcp_server._palace_db_mtime
+        monkeypatch.setattr(mcp_server, "_palace_db_mtime", old_mtime - 10.0)
+
+        quarantine_calls: list[str] = []
+        original_prepare = ChromaBackend._prepare_palace_for_open
+
+        @staticmethod
+        def spy_prepare(path):
+            quarantine_calls.append(path)
+            original_prepare(path)
+
+        monkeypatch.setattr(ChromaBackend, "_prepare_palace_for_open", spy_prepare)
+
+        mcp_server._get_client()
+
+        assert len(quarantine_calls) == 1, (
+            "_get_client should call _prepare_palace_for_open on reconnect"
+        )
 
     def test_call_kg_retries_after_concurrent_close(self, monkeypatch):
         """A KG closed mid-handler must trigger a one-shot retry with a fresh
@@ -2709,6 +3596,88 @@ class TestParamShapeDiagnostics:
         assert "'agent_name'" in message
         assert "'entry'" in message
         assert " and " not in message.split("for tool")[0]
+
+    def test_diary_write_content_aliases_entry(self, monkeypatch):
+        """A content-only diary_write call is remapped to 'entry' before
+        dispatch (#1245 alias), so it satisfies the required param and the
+        alias key is consumed rather than passed through to the handler.
+        """
+        from mempalace import mcp_server
+
+        captured = {}
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_diary_write"], "handler", capture)
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 5,
+                "params": {
+                    "name": "mempalace_diary_write",
+                    "arguments": {"agent_name": "test", "content": "hello world"},
+                },
+            }
+        )
+        assert "error" not in resp
+        assert captured.get("entry") == "hello world"
+        assert "content" not in captured
+
+    def test_diary_write_entry_wins_over_content(self, monkeypatch):
+        """When both 'entry' and the 'content' alias are supplied, 'entry' wins
+        and the alias is dropped.
+        """
+        from mempalace import mcp_server
+
+        captured = {}
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_diary_write"], "handler", capture)
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 6,
+                "params": {
+                    "name": "mempalace_diary_write",
+                    "arguments": {"agent_name": "t", "entry": "real", "content": "alias"},
+                },
+            }
+        )
+        assert "error" not in resp
+        assert captured.get("entry") == "real"
+        assert "content" not in captured
+
+    def test_diary_write_explicit_empty_entry_not_overridden_by_content(self, monkeypatch):
+        """An explicitly supplied (even falsy "") 'entry' wins over 'content' —
+        the alias only fills in when 'entry' is absent or null, not merely falsy.
+        """
+        from mempalace import mcp_server
+
+        captured = {}
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_diary_write"], "handler", capture)
+        resp = mcp_server.handle_request(
+            {
+                "method": "tools/call",
+                "id": 7,
+                "params": {
+                    "name": "mempalace_diary_write",
+                    "arguments": {"agent_name": "t", "entry": "", "content": "alias"},
+                },
+            }
+        )
+        assert "error" not in resp
+        assert captured.get("entry") == ""
+        assert "content" not in captured
 
     def test_handler_internal_signature_shape_stays_generic(self, monkeypatch):
         """A TypeError whose function name does not match the dispatched
