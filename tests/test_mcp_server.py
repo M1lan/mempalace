@@ -845,6 +845,106 @@ class TestReadTools:
         assert result["taxonomy"]["project"]["frontend"] == 1
         assert result["taxonomy"]["notes"]["planning"] == 1
 
+    def test_overview_tools_use_sqlite_fast_path(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        """Overview tools must answer from the sqlite cross-tab without paging
+        all metadata through the chroma client (#1748 / #1379). A tripwire on
+        the pagination helper fails loudly if the fast path regresses to the
+        slow client path that times out on large palaces."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        def _boom(*_a, **_k):
+            raise AssertionError("pagination path used instead of sqlite fast path")
+
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+        monkeypatch.setattr(mcp_server, "_fetch_all_metadata", _boom)
+
+        status = mcp_server.tool_status()
+        assert status["total_drawers"] == 4
+        assert status["wings"] == {"project": 3, "notes": 1}
+
+        assert mcp_server.tool_list_wings()["wings"] == {"project": 3, "notes": 1}
+
+        rooms = mcp_server.tool_list_rooms(wing="project")["rooms"]
+        assert rooms == {"backend": 2, "frontend": 1}
+
+        tax = mcp_server.tool_get_taxonomy()["taxonomy"]
+        assert tax["project"] == {"backend": 2, "frontend": 1}
+        assert tax["notes"] == {"planning": 1}
+
+    def test_overview_tools_normalize_missing_wing_room_to_unknown(
+        self, monkeypatch, config, palace_path, collection, kg
+    ):
+        """Fast path must keep the client path's contract: drawers missing
+        wing/room metadata read as 'unknown', not the sqlite COALESCE
+        placeholder '?' (#1748 review)."""
+        collection.add(
+            ids=["no_meta_drawer"],
+            documents=["a drawer with no wing or room metadata"],
+            metadatas=[{"source_file": "loose.txt"}],
+        )
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_metadata_cache", None)
+
+        tax = mcp_server.tool_get_taxonomy()["taxonomy"]
+        assert tax == {"unknown": {"unknown": 1}}
+
+        status = mcp_server.tool_status()
+        assert status["wings"] == {"unknown": 1}
+        assert status["rooms"] == {"unknown": 1}
+
+    def test_graph_stats_uses_sqlite_fast_path(
+        self, monkeypatch, config, palace_path, collection, kg
+    ):
+        """graph_stats must aggregate from sqlite without paging metadata
+        through build_graph()/HNSW (#1379). Mirrors the build_graph parity
+        case in test_palace_graph. Tripwires fail loudly if the fast path
+        regresses: graph_stats() (the slow client build) and _get_collection()
+        (any client/HNSW open) must never be reached."""
+        collection.add(
+            ids=["d_db_code", "d_db_proj", "d_auth", "d_general", "d_orphan"],
+            documents=[
+                "chromadb setup in the code wing",
+                "chromadb usage in the project wing",
+                "auth and security notes",
+                "a general catch-all drawer",
+                "a drawer with no wing",
+            ],
+            metadatas=[
+                {"room": "chromadb", "wing": "wing_code", "hall": "db"},
+                {"room": "chromadb", "wing": "wing_project", "hall": "db"},
+                {"room": "auth", "wing": "wing_code", "hall": "security"},
+                {"room": "general", "wing": "wing_code", "hall": "misc"},
+                {"room": "orphan", "source_file": "loose.txt"},
+            ],
+        )
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        def _boom(*_a, **_k):
+            raise AssertionError("build_graph client path used instead of sqlite fast path")
+
+        def _no_client_open(*_a, **_k):
+            raise AssertionError("chroma collection opened — fast path must avoid HNSW")
+
+        monkeypatch.setattr(mcp_server, "graph_stats", _boom)
+        monkeypatch.setattr(mcp_server, "_get_collection", _no_client_open)
+
+        stats = mcp_server.tool_graph_stats()
+        # "general" room and the wing-less drawer are excluded, matching
+        # build_graph's per-drawer filter.
+        assert stats["total_rooms"] == 2
+        assert stats["tunnel_rooms"] == 1
+        assert stats["total_edges"] == 1
+        assert stats["rooms_per_wing"] == {"wing_code": 2, "wing_project": 1}
+        assert stats["top_tunnels"] == [
+            {"room": "chromadb", "wings": ["wing_code", "wing_project"], "count": 2}
+        ]
+
     def test_no_palace_returns_error(self, monkeypatch, config, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_status
@@ -1189,12 +1289,12 @@ class TestSearchTool:
 
     def test_wal_redacts_sensitive_fields(self, monkeypatch, config, kg, tmp_path):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace import mcp_server
+        from mempalace import wal
 
         wal_file = tmp_path / "write_log.jsonl"
-        monkeypatch.setattr(mcp_server, "_WAL_FILE", wal_file)
+        monkeypatch.setattr(wal, "_WAL_FILE", wal_file)
 
-        mcp_server._wal_log(
+        wal._wal_log(
             "test",
             {"content": "secret note", "query": "private search", "safe": "ok"},
         )
@@ -2932,13 +3032,13 @@ class TestImportKillSwitchSafety:
         Proves the deferred setup still works (defers WAL creation to write
         time, does not disable it) and preserves the WAL permission bits.
         """
-        from mempalace import mcp_server
+        from mempalace import wal
 
         wal_file = tmp_path / "fresh" / "wal" / "write_log.jsonl"
         assert not wal_file.parent.exists()
-        monkeypatch.setattr(mcp_server, "_WAL_FILE", wal_file)
+        monkeypatch.setattr(wal, "_WAL_FILE", wal_file)
 
-        mcp_server._wal_log("test_op", {"safe": "ok"})
+        wal._wal_log("test_op", {"safe": "ok"})
 
         assert wal_file.exists(), "lazy WAL init did not create the log on first write"
         entry = json.loads(wal_file.read_text().strip())

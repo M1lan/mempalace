@@ -60,6 +60,7 @@ from .config import (  # noqa: E402
     sanitize_name,
     sanitize_content,
     sanitize_iso_temporal,
+    sqlite_read_uri,
     strip_lone_surrogates,
 )
 from .version import __version__  # noqa: E402
@@ -464,83 +465,12 @@ def _refresh_vector_disabled_flag() -> None:
 # Every write operation is logged to a JSONL file before execution.
 # This provides an audit trail for detecting memory poisoning and
 # enables review/rollback of writes from external or untrusted sources.
-
-_WAL_FILE = Path(os.path.expanduser("~/.mempalace/wal")) / "write_log.jsonl"
-_WAL_INITIALIZED_DIR = None
-
-
-def _ensure_wal() -> None:
-    """Create (and re-harden) the WAL directory lazily, on the first write.
-
-    This must NOT run at import time: a user who removed ``~/.mempalace`` has
-    engaged the documented kill-switch (``hooks_cli._palace_root_exists()``,
-    #1305), and recreating the directory just by importing this module would
-    silently re-arm the autosave/mining hooks they disabled (#1676). Creating
-    it on the first real write keeps the kill-switch contract intact.
-
-    It is deliberately not gated on ``_palace_root_exists()``: by the time a
-    write reaches here the palace is already being recreated by the ChromaDB/KG
-    layer regardless, so gating would only drop audit records, not prevent
-    recreation. Runtime kill-switch enforcement for MCP writes is the broader
-    question tracked in #504.
-
-    Hardening is attempted once per directory and the path cached in
-    ``_WAL_INITIALIZED_DIR`` regardless of outcome (keyed on the path, so a
-    test repointing ``_WAL_FILE`` re-initialises), so a persistent failure on a
-    restricted filesystem does not retry on every write. ``mkdir`` runs only
-    when the initial ``chmod`` raises ``FileNotFoundError`` (EAFP). The parent
-    ``~/.mempalace`` keeps its umask mode, like the other palace directories;
-    the WAL file is created atomically with mode 0o600 by ``_wal_log``.
-    """
-    global _WAL_INITIALIZED_DIR
-    wal_dir = _WAL_FILE.parent
-    if _WAL_INITIALIZED_DIR == wal_dir:
-        return
-    try:
-        wal_dir.chmod(0o700)
-    except FileNotFoundError:
-        try:
-            wal_dir.mkdir(parents=True, exist_ok=True)
-            wal_dir.chmod(0o700)
-        except (OSError, NotImplementedError):
-            pass
-    except (OSError, NotImplementedError):
-        pass
-    # Cache regardless of outcome: one attempt per directory, so a persistent
-    # chmod/mkdir failure (restricted FS) is not retried on every write.
-    _WAL_INITIALIZED_DIR = wal_dir
-
-
-# Keys whose values should be redacted in WAL entries to avoid logging sensitive content
-_WAL_REDACT_KEYS = frozenset(
-    {"content", "content_preview", "document", "entry", "entry_preview", "query", "text"}
-)
-
-
-def _wal_log(operation: str, params: dict, result: dict = None):
-    """Append a write operation to the write-ahead log."""
-    # Redact sensitive content from params before logging
-    safe_params = {}
-    for k, v in params.items():
-        if k in _WAL_REDACT_KEYS:
-            safe_params[k] = f"[REDACTED {len(v)} chars]" if isinstance(v, str) else "[REDACTED]"
-        else:
-            safe_params[k] = v
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "operation": operation,
-        "params": safe_params,
-        "result": result,
-    }
-    try:
-        # Dir setup shares the append's exception handler below: any WAL
-        # failure is logged and non-fatal, never crashing the tool call.
-        _ensure_wal()
-        fd = os.open(str(_WAL_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
-    except Exception as e:
-        logger.error(f"WAL write failed: {e}")
+#
+# The implementation lives in mempalace.wal — a side-effect-free module — so the
+# CLI sync path and the daemon service layer can audit writes without importing
+# this module, whose import installs MCP stdio protection (os.dup2(2, 1) and
+# sys.stdout = sys.stderr) that would misroute their output.
+from .wal import _wal_log  # noqa: E402
 
 
 def _get_client():
@@ -991,7 +921,7 @@ def _tool_status_via_sqlite() -> dict:
     rooms: dict = {}
     total = 0
     try:
-        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = _sqlite3.connect(sqlite_read_uri(db_path), uri=True)
         try:
             row = conn.execute(
                 """
@@ -1044,6 +974,165 @@ def _tool_status_via_sqlite() -> dict:
     return result
 
 
+def _sqlite_taxonomy():
+    """Fast wing→room tally straight from ``chroma.sqlite3`` (#1748 / #1379).
+
+    Returns ``(total, {wing: {room: count}})`` or ``None`` to signal the
+    caller to fall back to the ChromaDB client pagination path. ``None`` means
+    a non-chroma backend, a missing/unbootstrapped palace, or a sqlite error —
+    exactly the cases ``backends.chroma._sqlite_wing_room_counts`` already
+    handles for the CLI ``miner.status()``. The point is to answer the
+    overview tools from the relational metadata without cold-loading the HNSW
+    index, which costs tens of seconds per call on large palaces and is what
+    times them out under the MCP host limit.
+    """
+    if not _is_chroma_backend():
+        return None
+    try:
+        from .backends.chroma import _sqlite_wing_room_counts
+
+        counts = _sqlite_wing_room_counts(_config.palace_path, _config.collection_name)
+    except Exception:
+        logger.debug("sqlite taxonomy fast path failed; falling back", exc_info=True)
+        return None
+    if counts is None:
+        return None
+
+    # Preserve the client path's output contract: drawers missing wing/room
+    # read as "unknown" (the ``m.get("wing", "unknown")`` default), not the
+    # sqlite COALESCE placeholder "?". Without this, the fast path would be an
+    # observable API change for MCP clients on legacy/partial drawers.
+    def _norm(key):
+        return "unknown" if key in (None, "?") else key
+
+    total, wing_rooms = counts
+    normalized: dict = {}
+    for wing, room_counts in wing_rooms.items():
+        dest = normalized.setdefault(_norm(wing), {})
+        for room, n in room_counts.items():
+            rkey = _norm(room)
+            dest[rkey] = dest.get(rkey, 0) + n
+    return total, normalized
+
+
+def _sqlite_graph_stats():
+    """Compute ``graph_stats`` from one grouped sqlite read (#1379, graph_stats
+    half; follow-up to #1748).
+
+    ``graph_stats`` only needs grouped counts, but the client path builds the
+    whole graph by paging every metadata row (``build_graph`` →
+    ``col.get(limit, offset)``) and cold-loads the HNSW index — which times out
+    on six-figure palaces. This reads the same wing/room/hall grouping straight
+    from ``chroma.sqlite3`` and reconstructs the stats.
+
+    Returns the stats dict, or ``None`` to fall back to the client path
+    (non-chroma backend, missing/unbootstrapped palace, sqlite error). The
+    reconstruction mirrors ``palace_graph.build_graph`` /
+    ``palace_graph.graph_stats`` exactly: a node is a room with a non-empty
+    wing and a usable room name (the catch-all ``"general"`` is excluded), and
+    edges are the per-hall cross-wing crossings of multi-wing rooms.
+    """
+    if not _is_chroma_backend():
+        return None
+    import sqlite3 as _sqlite3
+    from collections import Counter, defaultdict
+
+    if not _config.palace_path:
+        return None
+    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db_path):
+        return None
+    collection_name = _config.collection_name
+    # Treat any failure as a soft fallback to the client path (sqlite errors,
+    # but also an unexpected schema shape tripping the reconstruction) so
+    # graph_stats degrades to build_graph() rather than raising — mirroring the
+    # sibling sqlite fast paths (_sqlite_taxonomy / _sqlite_wing_room_counts).
+    try:
+        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            conn.execute("PRAGMA busy_timeout = 3000")
+            if (
+                conn.execute(
+                    "SELECT 1 FROM collections WHERE name = ?", (collection_name,)
+                ).fetchone()
+                is None
+            ):
+                return None
+            rows = conn.execute(
+                """
+                SELECT
+                    COALESCE(rm.string_value, CAST(rm.int_value AS TEXT),
+                             CAST(rm.float_value AS TEXT), '') AS room,
+                    COALESCE(wm.string_value, CAST(wm.int_value AS TEXT),
+                             CAST(wm.float_value AS TEXT), '') AS wing,
+                    COALESCE(hm.string_value, CAST(hm.int_value AS TEXT),
+                             CAST(hm.float_value AS TEXT), '') AS hall,
+                    COUNT(*) AS n
+                FROM embeddings e
+                JOIN segments s ON e.segment_id = s.id AND s.scope = 'METADATA'
+                JOIN collections c ON s.collection = c.id
+                LEFT JOIN embedding_metadata rm ON rm.id = e.id AND rm.key = 'room'
+                LEFT JOIN embedding_metadata wm ON wm.id = e.id AND wm.key = 'wing'
+                LEFT JOIN embedding_metadata hm ON hm.id = e.id AND hm.key = 'hall'
+                WHERE c.name = ?
+                GROUP BY room, wing, hall
+                """,
+                (collection_name,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        # Reconstruct build_graph()'s room_data, applying its per-drawer filter
+        # (`if room and room != "general" and wing`).
+        room_data = defaultdict(lambda: {"wings": set(), "halls": set(), "count": 0})
+        for room, wing, hall, n in rows:
+            if not room or room == "general" or not wing:
+                continue
+            node = room_data[room]
+            node["wings"].add(wing)
+            if hall:
+                node["halls"].add(hall)
+            node["count"] += int(n)
+
+        tunnel_rooms = 0
+        total_edges = 0
+        wing_counts = Counter()
+        for data in room_data.values():
+            n_wings = len(data["wings"])
+            for wing in data["wings"]:
+                wing_counts[wing] += 1
+            if n_wings >= 2:
+                tunnel_rooms += 1
+                # Edges per multi-wing room: one per wing-pair per hall, matching
+                # build_graph's nested wa<wb × hall expansion.
+                total_edges += (n_wings * (n_wings - 1) // 2) * len(data["halls"])
+
+        top_tunnels = [
+            {"room": room, "wings": sorted(data["wings"]), "count": data["count"]}
+            # build_graph's graph_stats slices the top 10 by wing-count first,
+            # then keeps the multi-wing ones. An explicit room-name tiebreaker
+            # keeps the fast path deterministic across runs — preferable to
+            # leaning on SQLite's unspecified GROUP BY order. (Exact membership
+            # parity with the client path is unattainable anyway; the two never
+            # run on the same palace, since the backend picks one.)
+            for room, data in sorted(
+                room_data.items(), key=lambda kv: (-len(kv[1]["wings"]), kv[0])
+            )[:10]
+            if len(data["wings"]) >= 2
+        ]
+
+        return {
+            "total_rooms": len(room_data),
+            "tunnel_rooms": tunnel_rooms,
+            "total_edges": total_edges,
+            "rooms_per_wing": dict(wing_counts.most_common()),
+            "top_tunnels": top_tunnels,
+        }
+    except Exception:
+        logger.debug("sqlite graph_stats fast path failed; falling back", exc_info=True)
+        return None
+
+
 def tool_status():
     # Run the safe sqlite/pickle probe before we touch chromadb. In the
     # #1222 failure mode, opening the persistent client to call .count()
@@ -1054,6 +1143,29 @@ def tool_status():
 
     if _vector_disabled:
         return _tool_status_via_sqlite()
+
+    # Fast path: tally wing/room straight from sqlite so overview tools stay
+    # responsive on large palaces instead of cold-loading the HNSW index or
+    # paging hundreds of MB of metadata through the client (#1748 / #1379).
+    # ``None`` (non-chroma backend / non-standard layout) falls through to the
+    # client path below.
+    fast = _sqlite_taxonomy()
+    if fast is not None:
+        total, wing_rooms = fast
+        wings = {}
+        rooms = {}
+        for w, room_counts in wing_rooms.items():
+            wings[w] = wings.get(w, 0) + sum(room_counts.values())
+            for r, n in room_counts.items():
+                rooms[r] = rooms.get(r, 0) + n
+        return {
+            "total_drawers": total,
+            "wings": wings,
+            "rooms": rooms,
+            "protocol": PALACE_PROTOCOL,
+            "aaak_dialect": AAAK_SPEC,
+            "backend": _selected_backend_name(),
+        }
 
     # Use create=True only when a palace DB already exists on disk -- this
     # bootstraps the ChromaDB collection on a valid-but-empty palace without
@@ -1121,6 +1233,13 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight."""
 
 
 def tool_list_wings():
+    fast = _sqlite_taxonomy()
+    if fast is not None:
+        _total, wing_rooms = fast
+        wings = {}
+        for w, room_counts in wing_rooms.items():
+            wings[w] = wings.get(w, 0) + sum(room_counts.values())
+        return {"wings": wings}
     col = _get_collection()
     if not col:
         return _collection_error_or_no_palace()
@@ -1144,6 +1263,16 @@ def tool_list_rooms(wing: str = None):
         wing = _sanitize_optional_name(wing, "wing")
     except ValueError as e:
         return {"error": str(e)}
+    fast = _sqlite_taxonomy()
+    if fast is not None:
+        _total, wing_rooms = fast
+        rooms = {}
+        for w, room_counts in wing_rooms.items():
+            if wing and w != wing:
+                continue
+            for r, n in room_counts.items():
+                rooms[r] = rooms.get(r, 0) + n
+        return {"wing": wing or "all", "rooms": rooms}
     col = _get_collection()
     if not col:
         return _collection_error_or_no_palace()
@@ -1164,6 +1293,10 @@ def tool_list_rooms(wing: str = None):
 
 
 def tool_get_taxonomy():
+    fast = _sqlite_taxonomy()
+    if fast is not None:
+        _total, wing_rooms = fast
+        return {"taxonomy": {w: dict(room_counts) for w, room_counts in wing_rooms.items()}}
     col = _get_collection()
     if not col:
         return _collection_error_or_no_palace()
@@ -1341,6 +1474,12 @@ def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
 
 def tool_graph_stats():
     """Palace graph overview: nodes, tunnels, edges, connectivity."""
+    # Fast path: grouped sqlite read instead of paging all metadata and
+    # cold-loading HNSW via build_graph(), which times out on large palaces
+    # (#1379). Falls through to the client path for non-chroma backends.
+    fast = _sqlite_graph_stats()
+    if fast is not None:
+        return fast
     col = _get_collection()
     if not col:
         return _collection_error_or_no_palace()
