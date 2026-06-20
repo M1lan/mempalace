@@ -13,6 +13,7 @@ import mempalace.hooks_cli as hooks_cli_mod
 from mempalace.hooks_cli import (
     SAVE_INTERVAL,
     _count_human_messages,
+    _diary_agent_for_harness,
     _extract_recent_messages,
     _get_mine_targets,
     _log,
@@ -22,6 +23,7 @@ from mempalace.hooks_cli import (
     _mine_sync,
     _parse_harness_input,
     _sanitize_session_id,
+    _save_diary_direct,
     _validate_transcript_path,
     _wing_from_transcript_path,
     hook_stop,
@@ -81,6 +83,50 @@ def test_mempalace_python_finds_venv():
     assert result and "python" in os.path.basename(result).lower()
 
 
+def test_mempalace_python_handles_shallow_path_without_crashing(monkeypatch):
+    """Regression: _mempalace_python must not raise IndexError when the
+    package lives at a shallow filesystem path.
+
+    The function used to index ``Path(__file__).resolve().parents[3]`` to
+    find the venv root for the standard ``<venv>/lib/python3.X/site-packages/
+    mempalace/`` install. In editable installs at a shallow path (Docker
+    containers mounting at ``/work``, ``/opt/app``, etc.), ``parents`` has
+    fewer than 4 elements and the bare index would raise ``IndexError``.
+    Affected sites: Docker-based dev, OrbStack-style cross-platform CI,
+    minimal-prefix production installs.
+
+    The fix uses ``len(parents)`` LBYL checks so the function falls through
+    to the editable-install branch (``parents[1]``) and ultimately to
+    ``sys.executable``, instead of crashing.
+    """
+    from pathlib import Path as RealPath
+    from unittest.mock import MagicMock, patch
+
+    # Build a fake parents sequence with only 3 elements (indices 0, 1, 2);
+    # ``parents[3]`` would raise IndexError if accessed. Production code
+    # uses ``len(parents) > 3`` LBYL guard to skip that branch, so the
+    # IndexError should never actually fire — but ``side_effect`` keeps it
+    # defensive against a future regression that drops the length check.
+    def get_item(idx):
+        if idx == 1:
+            return RealPath("/work/mempalace")
+        raise IndexError(idx)
+
+    fake_parents = MagicMock()
+    fake_parents.__len__.return_value = 3
+    fake_parents.__getitem__.side_effect = get_item
+
+    fake_path = MagicMock()
+    fake_path.resolve.return_value.parents = fake_parents
+
+    with patch("mempalace.hooks_cli.Path", return_value=fake_path):
+        # Must not raise; must return SOME string (either editable-venv
+        # fallback path or sys.executable).
+        result = _mempalace_python()
+        assert isinstance(result, str)
+        assert "python" in result.lower()
+
+
 # --- _sanitize_session_id ---
 
 
@@ -124,7 +170,12 @@ def test_count_skips_command_messages(tmp_path):
     _write_transcript(
         transcript,
         [
-            {"message": {"role": "user", "content": "<command-message>status</command-message>"}},
+            {
+                "message": {
+                    "role": "user",
+                    "content": "<command-message>status</command-message>",
+                }
+            },
             {"message": {"role": "user", "content": "real question"}},
         ],
     )
@@ -136,7 +187,12 @@ def test_count_handles_list_content(tmp_path):
     _write_transcript(
         transcript,
         [
-            {"message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}},
+            {
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}],
+                }
+            },
             {
                 "message": {
                     "role": "user",
@@ -207,7 +263,12 @@ def _capture_hook_output(hook_fn, data, harness="claude-code", state_dir=None):
     from unittest.mock import PropertyMock
 
     buf = io.StringIO()
-    patches = [patch("mempalace.hooks_cli._output", side_effect=lambda d: buf.write(json.dumps(d)))]
+    patches = [
+        patch(
+            "mempalace.hooks_cli._output",
+            side_effect=lambda d: buf.write(json.dumps(d)),
+        )
+    ]
     if state_dir:
         patches.append(patch("mempalace.hooks_cli.STATE_DIR", state_dir))
     # Mock MempalaceConfig so tests don't depend on user's ~/.mempalace/config.json
@@ -250,7 +311,11 @@ def test_stop_hook_passthrough_below_interval(tmp_path):
     )
     result = _capture_hook_output(
         hook_stop,
-        {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
+        {
+            "session_id": "test",
+            "stop_hook_active": False,
+            "transcript_path": str(transcript),
+        },
         state_dir=tmp_path,
     )
     assert result == {}
@@ -273,7 +338,9 @@ def test_stop_hook_saves_silently_at_interval(tmp_path):
     assert result["systemMessage"].startswith("\u2726 15 memories woven into the palace")
     assert "hooks" in result["systemMessage"]
     # tmp_path has no "-Projects-" segment, so _wing_from_transcript_path falls back to "wing_sessions"
-    mock_save.assert_called_once_with(str(transcript), "test", wing="wing_sessions", toast=False)
+    mock_save.assert_called_once_with(
+        str(transcript), "test", wing="wing_sessions", toast=False, agent_name="claude"
+    )
 
 
 def test_stop_hook_derives_wing_from_transcript_path(tmp_path):
@@ -292,7 +359,9 @@ def test_stop_hook_derives_wing_from_transcript_path(tmp_path):
             {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
             state_dir=tmp_path,
         )
-    mock_save.assert_called_once_with(str(transcript), "test", wing="wing_myproject", toast=False)
+    mock_save.assert_called_once_with(
+        str(transcript), "test", wing="wing_myproject", toast=False, agent_name="claude"
+    )
 
 
 def test_stop_hook_tracks_save_point(tmp_path):
@@ -301,7 +370,11 @@ def test_stop_hook_tracks_save_point(tmp_path):
         transcript,
         [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
     )
-    data = {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)}
+    data = {
+        "session_id": "test",
+        "stop_hook_active": False,
+        "transcript_path": str(transcript),
+    }
 
     # First call saves silently with systemMessage notification
     save_result = {"count": 15, "themes": ["hooks"]}
@@ -314,6 +387,84 @@ def test_stop_hook_tracks_save_point(tmp_path):
         result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
     assert result == {}
     mock_save.assert_not_called()
+
+
+# --- #1693: hook checkpoints must be discoverable by diary_read ---
+
+
+def test_diary_agent_for_harness_maps_known_harnesses():
+    assert _diary_agent_for_harness("claude-code") == "claude"
+    assert _diary_agent_for_harness("codex") == "codex"
+
+
+def test_diary_agent_for_harness_unknown_falls_back_to_name():
+    """A future harness must never collapse to the legacy 'session-hook'
+    identity, which no diary_read(agent_name=...) call ever matches (#1693)."""
+    assert _diary_agent_for_harness("cursor") == "cursor"
+    for harness in ("claude-code", "codex", "cursor", "gemini"):
+        assert _diary_agent_for_harness(harness) != "session-hook"
+
+
+@pytest.mark.parametrize(
+    "harness,expected_agent",
+    [("claude-code", "claude"), ("codex", "codex")],
+)
+def test_stop_hook_files_checkpoint_under_harness_agent(tmp_path, harness, expected_agent):
+    """The Stop hook must file checkpoints under the agent identity that the
+    session's harness reads with, not the legacy hardcoded 'session-hook'
+    (#1693)."""
+    # _save_diary_direct is mocked below, so the transcript format is irrelevant
+    # here: _count_human_messages counts both harness shapes, and we assert only
+    # the harness -> agent_name routing, not transcript parsing.
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
+    )
+    with patch(
+        "mempalace.hooks_cli._save_diary_direct", return_value={"count": 5, "themes": []}
+    ) as mock_save:
+        _capture_hook_output(
+            hook_stop,
+            {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
+            harness=harness,
+            state_dir=tmp_path,
+        )
+    assert mock_save.call_args.kwargs["agent_name"] == expected_agent
+
+
+def test_stop_hook_checkpoint_visible_to_diary_read(monkeypatch, config, palace_path, kg, tmp_path):
+    """End-to-end regression for #1693: a checkpoint written by the Stop hook
+    save path is discoverable via diary_read under the harness agent identity,
+    and is not siloed under the legacy 'session-hook' identity."""
+    import chromadb
+
+    from mempalace import mcp_server
+    from mempalace.mcp_server import tool_diary_read
+
+    monkeypatch.setattr(mcp_server, "_config", config)
+    monkeypatch.setattr(mcp_server, "_get_kg", lambda *a, **kw: kg)
+    client = chromadb.PersistentClient(path=palace_path)
+    client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    del client
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(5)],
+    )
+
+    agent = _diary_agent_for_harness("claude-code")
+    res = _save_diary_direct(str(transcript), "sess1", wing="wing_.claude", agent_name=agent)
+    assert res["count"] > 0
+
+    visible = tool_diary_read(agent_name="claude")
+    assert visible.get("total", 0) >= 1
+    assert "CHECKPOINT" in visible["entries"][0]["content"]
+
+    # The legacy identity no longer captures hook checkpoints.
+    legacy = tool_diary_read(agent_name="session-hook")
+    assert legacy.get("entries") == []
 
 
 # --- hook_session_start ---
@@ -694,7 +845,9 @@ def test_claim_mine_slot_writes_live_placeholder_pid(tmp_path):
         pid_file = _claim_mine_slot(cmd)
 
         assert pid_file == _pid_file_for_cmd(cmd)
-        assert pid_file.read_text().strip() == str(os.getpid())
+        # Format: "{pid} {unix_timestamp}" — first token must be our PID.
+        content = pid_file.read_text().strip()
+        assert content.split()[0] == str(os.getpid())
         assert _mine_already_running(cmd) is True
         assert _claim_mine_slot(cmd) is None
 
@@ -715,7 +868,8 @@ def test_claim_mine_slot_reclaimed_slot_writes_live_placeholder_pid(tmp_path):
         reclaimed = _claim_mine_slot(cmd)
 
         assert reclaimed == pid_file
-        assert pid_file.read_text().strip() == str(os.getpid())
+        # Format: "{pid} {unix_timestamp}" — first token must be our PID.
+        assert pid_file.read_text().strip().split()[0] == str(os.getpid())
 
 
 def test_maybe_auto_ingest_ignores_transcript_arg_path(tmp_path):
@@ -789,7 +943,9 @@ def test_maybe_auto_ingest_skips_when_mine_running(tmp_path):
                 ]
                 pid_file = _pid_file_for_cmd(cmd)
                 pid_file.parent.mkdir(parents=True, exist_ok=True)
-                pid_file.write_text(str(os.getpid()))
+                import time as _time
+
+                pid_file.write_text(f"{os.getpid()} {int(_time.time())}")
                 with patch("mempalace.hooks_cli._mempalace_python", return_value=sys.executable):
                     with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
                         _maybe_auto_ingest()
@@ -855,6 +1011,8 @@ def test_spawn_mine_uses_detached_kwargs(tmp_path):
 
 def test_spawn_mine_skips_when_target_running(tmp_path):
     """A second spawn for the same cmd target while the first is alive must skip."""
+    import time as _time
+
     pid_dir = tmp_path / "mine_pids"
     with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
         with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
@@ -863,7 +1021,7 @@ def test_spawn_mine_skips_when_target_running(tmp_path):
             cmd = ["mempalace", "mine", "/tmp/proj", "--mode", "projects"]
             pid_file = _pid_file_for_cmd(cmd)
             pid_file.parent.mkdir(parents=True, exist_ok=True)
-            pid_file.write_text(str(os.getpid()))  # live PID
+            pid_file.write_text(f"{os.getpid()} {int(_time.time())}")  # live PID, fresh
 
             with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
                 _spawn_mine(cmd)
@@ -901,8 +1059,9 @@ def test_spawn_mine_reclaims_stale_slot(tmp_path):
                 mock_popen.return_value.pid = 4242
                 _spawn_mine(cmd)
                 mock_popen.assert_called_once()
-                # New PID is recorded in the reclaimed slot.
-                assert pid_file.read_text().strip() == "4242"
+                # New PID is recorded in the reclaimed slot (format: "{pid} {timestamp}").
+                content = pid_file.read_text().strip()
+                assert content.split()[0] == "4242"
 
 
 def test_spawn_mine_releases_slot_on_oserror(tmp_path):
@@ -978,7 +1137,9 @@ def test_ingest_transcript_skips_when_target_running(tmp_path):
                 ]
                 pid_file = _pid_file_for_cmd(expected_cmd)
                 pid_file.parent.mkdir(parents=True, exist_ok=True)
-                pid_file.write_text(str(os.getpid()))  # live target
+                import time as _time
+
+                pid_file.write_text(f"{os.getpid()} {int(_time.time())}")  # live target, fresh
 
                 with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
                     _ingest_transcript(str(transcript))
@@ -1016,11 +1177,103 @@ def test_mine_already_running_dead_pid(tmp_path):
 
 
 def test_mine_already_running_live_pid(tmp_path):
-    """Returns True when the slot's recorded PID is alive."""
+    """Returns True when the slot's recorded PID is alive (new {pid ts} format)."""
+    import time as _time
+
     pid_dir = tmp_path / "mine_pids"
     cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
-    _seed_slot(pid_dir, cmd, str(os.getpid()))  # current process is alive
+    # Use a recent timestamp so the default 2 h timeout does not trigger.
+    _seed_slot(pid_dir, cmd, f"{os.getpid()} {int(_time.time())}")
     with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
+        assert _mine_already_running(cmd) is True
+
+
+def test_mine_already_running_live_pid_bare_format(tmp_path):
+    """Old bare-PID format uses file mtime for the stale-by-age check."""
+    pid_dir = tmp_path / "mine_pids"
+    cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
+    _seed_slot(pid_dir, cmd, str(os.getpid()))  # old format: bare PID
+    with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
+        assert _mine_already_running(cmd) is True
+
+
+def test_mine_already_running_bare_pid_old_mtime_is_stale(tmp_path):
+    """Old bare-PID slots are reclaimed once their file mtime exceeds timeout."""
+    import time as _time
+
+    pid_dir = tmp_path / "mine_pids"
+    cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
+    slot = _seed_slot(pid_dir, cmd, str(os.getpid()))
+    old_mtime = _time.time() - 3601
+    os.utime(slot, (old_mtime, old_mtime))
+    with (
+        patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir),
+        patch.dict("os.environ", {"MEMPALACE_MINE_TIMEOUT_HOURS": "1"}),
+    ):
+        assert _mine_already_running(cmd) is False
+
+
+def test_mine_already_running_malformed_timestamp_is_stale(tmp_path):
+    """Malformed timestamps fail soft instead of crashing hook execution."""
+    pid_dir = tmp_path / "mine_pids"
+    cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
+    _seed_slot(pid_dir, cmd, f"{os.getpid()} not-a-timestamp")
+    with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
+        assert _mine_already_running(cmd) is False
+
+
+def test_mine_slot_timeout_invalid_env_disables_timeout():
+    """Invalid MEMPALACE_MINE_TIMEOUT_HOURS disables stale-by-age checks."""
+    from mempalace.hooks_cli import _mine_slot_timeout_secs
+
+    with patch.dict("os.environ", {"MEMPALACE_MINE_TIMEOUT_HOURS": "nope"}):
+        assert _mine_slot_timeout_secs() == 0.0
+
+
+def test_mine_already_running_live_pid_exceeds_timeout(tmp_path):
+    """Returns False when PID is alive but has exceeded the configured timeout (#1552)."""
+    import time as _time
+
+    pid_dir = tmp_path / "mine_pids"
+    cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
+    # Timestamp far in the past so any positive timeout fires immediately.
+    old_ts = int(_time.time()) - 3601  # 1 second past 1-hour mark
+    _seed_slot(pid_dir, cmd, f"{os.getpid()} {old_ts}")
+    with (
+        patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir),
+        patch.dict("os.environ", {"MEMPALACE_MINE_TIMEOUT_HOURS": "1"}),
+    ):
+        assert _mine_already_running(cmd) is False
+
+
+def test_mine_already_running_live_pid_within_timeout(tmp_path):
+    """Returns True when PID is alive and has NOT exceeded the configured timeout."""
+    import time as _time
+
+    pid_dir = tmp_path / "mine_pids"
+    cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
+    recent_ts = int(_time.time()) - 60  # only 1 minute old
+    _seed_slot(pid_dir, cmd, f"{os.getpid()} {recent_ts}")
+    with (
+        patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir),
+        patch.dict("os.environ", {"MEMPALACE_MINE_TIMEOUT_HOURS": "2"}),
+    ):
+        assert _mine_already_running(cmd) is True
+
+
+def test_mine_already_running_timeout_zero_disables_check(tmp_path):
+    """MEMPALACE_MINE_TIMEOUT_HOURS=0 disables the age-based stale check."""
+    import time as _time
+
+    pid_dir = tmp_path / "mine_pids"
+    cmd = ["mempalace", "mine", "/tmp/x", "--mode", "projects"]
+    old_ts = int(_time.time()) - 86400  # 24 hours ago — stale under any non-zero timeout
+    _seed_slot(pid_dir, cmd, f"{os.getpid()} {old_ts}")
+    with (
+        patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir),
+        patch.dict("os.environ", {"MEMPALACE_MINE_TIMEOUT_HOURS": "0"}),
+    ):
+        # Timeout disabled — alive PID is always considered running.
         assert _mine_already_running(cmd) is True
 
 
@@ -1035,10 +1288,13 @@ def test_mine_already_running_corrupt_file(tmp_path):
 
 def test_mine_already_running_distinct_cmds_independent(tmp_path):
     """Slots are keyed per cmd; an alive entry for cmd A doesn't shadow cmd B."""
+    import time as _time
+
     pid_dir = tmp_path / "mine_pids"
     cmd_a = ["mempalace", "mine", "/tmp/a", "--mode", "projects"]
     cmd_b = ["mempalace", "mine", "/tmp/b", "--mode", "projects"]
-    _seed_slot(pid_dir, cmd_a, str(os.getpid()))
+    recent_ts = int(_time.time())
+    _seed_slot(pid_dir, cmd_a, f"{os.getpid()} {recent_ts}")
     with patch("mempalace.hooks_cli._MINE_PID_DIR", pid_dir):
         assert _mine_already_running(cmd_a) is True
         assert _mine_already_running(cmd_b) is False
@@ -1130,7 +1386,11 @@ def test_parse_harness_input_unknown():
 
 def test_parse_harness_input_valid():
     result = _parse_harness_input(
-        {"session_id": "abc-123", "stop_hook_active": True, "transcript_path": "/tmp/t.jsonl"},
+        {
+            "session_id": "abc-123",
+            "stop_hook_active": True,
+            "transcript_path": "/tmp/t.jsonl",
+        },
         "claude-code",
     )
     assert result["session_id"] == "abc-123"
@@ -1280,7 +1540,8 @@ def test_run_hook_dispatches_session_start(tmp_path):
 def test_run_hook_dispatches_stop(tmp_path):
     transcript = tmp_path / "t.jsonl"
     _write_transcript(
-        transcript, [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(3)]
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(3)],
     )
     stdin_data = json.dumps(
         {
@@ -1303,6 +1564,82 @@ def test_run_hook_dispatches_precompact(tmp_path):
             with patch("mempalace.hooks_cli._output") as mock_output:
                 run_hook("precompact", "claude-code")
     mock_output.assert_called_once_with({})
+
+
+# --- auto_save config toggle ---
+
+
+def test_stop_hook_disabled_by_config(tmp_path):
+    """When hooks.auto_save is false in config, stop hook passes through."""
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
+    )
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = False
+        result = _capture_hook_output(
+            hook_stop,
+            {
+                "session_id": "test",
+                "stop_hook_active": False,
+                "transcript_path": str(transcript),
+            },
+            state_dir=tmp_path,
+        )
+    assert result == {}
+
+
+def test_stop_hook_enabled_by_default(tmp_path):
+    """When auto_save is enabled, stop hook saves silently (systemMessage)."""
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
+    )
+    save_result = {"count": 3, "themes": ["auto-save"]}
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        mock_cfg_cls.return_value.hook_silent_save = True
+        mock_cfg_cls.return_value.hook_desktop_toast = False
+        with patch("mempalace.hooks_cli._save_diary_direct", return_value=save_result):
+            result = _capture_hook_output(
+                hook_stop,
+                {
+                    "session_id": "test",
+                    "stop_hook_active": False,
+                    "transcript_path": str(transcript),
+                },
+                state_dir=tmp_path,
+            )
+    assert "systemMessage" in result
+    assert "3 memories" in result["systemMessage"]
+
+
+def test_precompact_hook_disabled_by_config(tmp_path):
+    """When hooks.auto_save is false, precompact hook passes through."""
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = False
+        result = _capture_hook_output(
+            hook_precompact,
+            {"session_id": "test"},
+            state_dir=tmp_path,
+        )
+    assert result == {}
+
+
+def test_precompact_hook_enabled_by_default(tmp_path):
+    """When auto_save is true, precompact mines synchronously then returns {}."""
+    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
+        mock_cfg_cls.return_value.hooks_auto_save = True
+        with patch("mempalace.hooks_cli._mine_sync") as mock_mine:
+            result = _capture_hook_output(
+                hook_precompact,
+                {"session_id": "test"},
+                state_dir=tmp_path,
+            )
+    assert result == {}
+    mock_mine.assert_called_once()
 
 
 def test_run_hook_unknown_hook():
