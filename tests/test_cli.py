@@ -167,6 +167,13 @@ def test_cmd_hook_calls_run_hook():
         mock_run.assert_called_once_with(hook_name="session-start", harness="claude-code")
 
 
+def test_cmd_hook_session_end_calls_run_hook():
+    args = argparse.Namespace(hook="session-end", harness="claude-code")
+    with patch("mempalace.hooks_cli.run_hook") as mock_run:
+        cmd_hook(args)
+        mock_run.assert_called_once_with(hook_name="session-end", harness="claude-code")
+
+
 # ── cmd_init ───────────────────────────────────────────────────────────
 
 
@@ -931,6 +938,18 @@ def test_main_hook_run_dispatches():
         mock_cmd.assert_called_once()
 
 
+def test_main_hook_run_dispatches_session_end():
+    with (
+        patch(
+            "sys.argv",
+            ["mempalace", "hook", "run", "--hook", "session-end", "--harness", "claude-code"],
+        ),
+        patch("mempalace.cli.cmd_hook") as mock_cmd,
+    ):
+        main()
+        mock_cmd.assert_called_once()
+
+
 def test_main_instructions_no_subcommand_prints_help(capsys):
     with patch("sys.argv", ["mempalace", "instructions"]):
         main()
@@ -954,6 +973,16 @@ def test_main_repair_dispatches():
     ):
         main()
         mock_cmd.assert_called_once()
+
+
+def test_main_repair_rebuild_index_dispatches():
+    with (
+        patch("sys.argv", ["mempalace", "repair", "rebuild-index"]),
+        patch("mempalace.cli.cmd_repair") as mock_cmd,
+    ):
+        main()
+        args = mock_cmd.call_args.args[0]
+        assert args.repair_action == "rebuild-index"
 
 
 def test_main_compress_dispatches():
@@ -1014,6 +1043,35 @@ def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
         cmd_repair(args)
     out = capsys.readouterr().out
     assert "Error reading palace" in out
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_repair_error_reading_points_to_from_sqlite_not_remine(
+    mock_config_cls, tmp_path, capsys
+):
+    """When the drawer-index read fails (the chromadb HNSW compactor cannot
+    apply WAL logs to the segment), legacy repair must point the user at
+    ``repair --mode from-sqlite`` — the rows are intact in chroma.sqlite3 —
+    and must NOT advise re-mining from source files, which silently drops
+    drawers added via the MCP server and diary entries (#1843)."""
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    sqlite3.connect(str(palace_dir / "chroma.sqlite3")).close()
+    mock_config_cls.return_value.palace_path = str(palace_dir)
+    mock_config_cls.return_value.collection_name = "mempalace_drawers"
+    args = argparse.Namespace(palace=None)
+    mock_col = MagicMock()
+    mock_col.count.side_effect = Exception(
+        "Error executing plan: Error sending backfill request to compactor: "
+        "Failed to apply logs to the hnsw segment writer"
+    )
+    mock_backend = MagicMock()
+    mock_backend.get_collection.return_value = mock_col
+    with patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend):
+        cmd_repair(args)
+    out = capsys.readouterr().out
+    assert "mempalace repair --mode from-sqlite --archive-existing" in out
+    assert "may need to be re-mined" not in out
 
 
 @patch("mempalace.cli.MempalaceConfig")
@@ -1719,3 +1777,29 @@ def test_cmd_repair_from_sqlite_success_does_not_exit(mock_config_cls, tmp_path)
     with patch("mempalace.repair.rebuild_from_sqlite", return_value=fake_counts):
         # Should return cleanly; no SystemExit raised.
         cmd_repair(args)
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_repair_rebuild_index_alias_uses_sqlite_archive(mock_config_cls, tmp_path):
+    """``repair rebuild-index`` must bypass Chroma reads and rebuild from SQLite."""
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    mock_config_cls.return_value.palace_path = str(palace_dir)
+
+    args = argparse.Namespace(
+        palace=str(palace_dir),
+        repair_action="rebuild-index",
+        mode="legacy",
+        source=None,
+        archive_existing=False,
+        yes=True,
+    )
+    fake_counts = {"mempalace_drawers": 1, "mempalace_closets": 0}
+    with patch("mempalace.repair.rebuild_from_sqlite", return_value=fake_counts) as rebuild:
+        cmd_repair(args)
+
+    rebuild.assert_called_once_with(
+        source_palace=str(palace_dir),
+        dest_palace=str(palace_dir),
+        archive_existing_dest=True,
+    )

@@ -54,6 +54,8 @@ READ_TOOLS = frozenset(
 WRITE_TOOLS = frozenset(
     {
         "mempalace_add_drawer",
+        "mempalace_checkpoint",
+        "mempalace_delete_by_source",
         "mempalace_delete_drawer",
         "mempalace_update_drawer",
         "mempalace_diary_write",
