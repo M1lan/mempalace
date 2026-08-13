@@ -1,0 +1,21 @@
+[meta]
+version = 1
+min_betterhook = ">=0.1.0"
+
+[hooks.pre-commit]
+stash_untracked = false
+
+[hooks.pre-commit.jobs.harness]
+run = "just harness-gate"
+timeout = "30s"
+
+[hooks.pre-commit.jobs.check]
+run = "just check"
+timeout = "5m"
+
+[hooks.pre-push]
+stash_untracked = false
+
+[hooks.pre-push.jobs.verify]
+run = "just verify"
+timeout = "30m"
