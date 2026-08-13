@@ -57,6 +57,7 @@ def _run_hook(
     assert BASH is not None
 
     env = os.environ.copy()
+    env.pop("BASH_ENV", None)
     env["PATH"] = str(bin_dir)
 
     return subprocess.run(
