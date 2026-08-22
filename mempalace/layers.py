@@ -319,6 +319,9 @@ class Layer3:
             lines.append(f"      {snippet}")
             if source:
                 lines.append(f"      src: {source}")
+            authored = (meta.get("authored_at") or "")[:10]
+            if authored:
+                lines.append(f"      authored: {authored}")
 
         return "\n".join(lines)
 
@@ -466,7 +469,7 @@ if __name__ == "__main__":
     import json
 
     def usage():
-        print("layers.py — 4-Layer Memory Stack")
+        print("layers.py -- 4-Layer Memory Stack")
         print()
         print("Usage:")
         print("  python layers.py wake-up              Show L0 + L1")

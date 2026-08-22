@@ -54,6 +54,7 @@ from .base import (
     PalaceNotFoundError,
     PalaceRef,
     QueryResult,
+    UnsupportedCapabilityError,
     UnsupportedFilterError,
     _IncludeSpec,
 )
@@ -674,13 +675,19 @@ class _PgVectorClient:
         *,
         where: Optional[dict] = None,
         with_embedding: bool = False,
+        with_document: bool = True,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> list[dict]:
         qi = _quote_identifier(table)
         params: list = []
         where_sql = _where_to_sql(where, params) if where else "TRUE"
-        cols = "id, document, metadata"
+        # Project NULL into the document slot when the caller only needs
+        # metadata (e.g. mempalace_status's wing/room tally). Keeps the
+        # positional _row parser unchanged — document remains record[1] —
+        # while avoiding O(n × document_size) bytes over the wire on remote
+        # pgvector deployments. Follow-up to #1840.
+        cols = "id, document, metadata" if with_document else "id, NULL::text, metadata"
         if with_embedding:
             cols += ", embedding"
         sql = f"SELECT {cols} FROM {qi} WHERE {where_sql}"
@@ -720,6 +727,29 @@ class _PgVectorClient:
     def count_rows(self, table: str) -> int:
         rows = self._execute(f"SELECT count(*) FROM {_quote_identifier(table)}", fetch=True)
         return int(rows[0][0]) if rows and rows[0] else 0
+
+    def facet_counts(
+        self,
+        table: str,
+        *,
+        field: str,
+        where: Optional[dict] = None,
+        limit: int = 1000,
+    ) -> dict[str, int]:
+        qi = _quote_identifier(table)
+        params: list = [field]
+        where_sql = _where_to_sql(where, params) if where else "TRUE"
+        sql = (
+            f"SELECT metadata->>%s AS k, count(*) AS c "
+            f"FROM {qi} WHERE {where_sql} "
+            f"GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT %s"
+        )
+        params.append(int(limit))
+        rows = self._execute(sql, params, fetch=True)
+        # Exclude NULL bucket: matches Qdrant's facet semantics; mcp_server
+        # reconciles missing values into "unknown" via the count diff
+        # (count(*) - sum(facet_values)).
+        return {str(row[0]): int(row[1]) for row in rows if row[0] is not None}
 
     def drop_table(self, table: str) -> None:
         self._execute(f"DROP TABLE IF EXISTS {_quote_identifier(table)}")
@@ -855,7 +885,15 @@ class PgVectorCollection(BaseCollection):
                 )
             self._known_dimension = existing_dim or dimension
 
-    def _scroll(self, *, where=None, with_embedding=False, limit=None, offset=None) -> list[dict]:
+    def _scroll(
+        self,
+        *,
+        where=None,
+        with_embedding=False,
+        with_document=True,
+        limit=None,
+        offset=None,
+    ) -> list[dict]:
         self._ensure_open()
         if not self._table_exists():
             if self._marker_exists():
@@ -865,9 +903,38 @@ class PgVectorCollection(BaseCollection):
             self._table,
             where=where,
             with_embedding=with_embedding,
+            with_document=with_document,
             limit=limit,
             offset=offset,
         )
+
+    def get_all_metadata(self, where=None) -> list[dict]:
+        """Single-pass metadata-only fetch — projects out the document column.
+
+        The base implementation pages through ``get(include=["metadatas"])``,
+        which routes here via ``_scroll`` and (pre-this-override) always sent
+        the ``document`` text over the wire even when nothing consumed it.
+        For pgvector deployments where the client is remote (TLS over WAN),
+        that meant ``mempalace_status`` transferred O(n × document_size)
+        bytes per call, dominating wall time. With ``with_document=False``
+        the SELECT replaces document with NULL, dropping the per-row payload
+        to id + metadata for every caller of this method.
+
+        Filtered fetches still need the ``_matches_where`` post-filter for
+        non-pushdown semantics (array/object values where ``metadata @> ...``
+        is broader than the exact match the caller asked for — same
+        correctness contract as #1840's filtered ``get`` path). Since that
+        post-filter only reads ``metadata``, we keep the single-scroll +
+        ``with_document=False`` fast path and just apply the filter locally
+        on the metadata dicts before returning. This extends the wire-byte
+        win to filtered callers as well.
+        """
+        _validate_where(where)
+        pushdown = None if _requires_local_filter(where) else where
+        rows = self._scroll(where=pushdown, with_document=False)
+        if where is None:
+            return [row["metadata"] for row in rows]
+        return [row["metadata"] for row in rows if _matches_where(row["metadata"], where)]
 
     def _rows(
         self,
@@ -1151,6 +1218,26 @@ class PgVectorCollection(BaseCollection):
             return 0
         return self._client.count_rows(self._table)
 
+    def facet_counts(
+        self,
+        field: str,
+        where: Optional[dict] = None,
+        limit: int = 1000,
+    ) -> dict[str, int]:
+        self._ensure_open()
+        # Validate the filter before the existence short-circuit so an
+        # unsupported local-only filter raises even on an unmaterialized
+        # collection — matches the order used by get()/lexical_search() and
+        # qdrant.facet_counts (PR #1868 review).
+        _validate_where(where)
+        if _requires_local_filter(where):
+            raise UnsupportedCapabilityError("facet_counts does not support local-only filters")
+        if not self._table_exists():
+            if self._marker_exists():
+                raise CollectionNotInitializedError(self._collection_name)
+            return {}
+        return self._client.facet_counts(self._table, field=field, where=where, limit=limit)
+
     def lexical_search(self, *, query: str, n_results: int = 10, where: Optional[dict] = None):
         _validate_where(where)
         pushdown = None if _requires_local_filter(where) else where
@@ -1248,6 +1335,7 @@ class PgVectorBackend(BaseBackend):
             "supports_embeddings_out",
             "supports_metadata_filters",
             "supports_lexical_search",
+            "supports_metadata_facets",
             "supports_namespace_isolation",
             "supports_server_side_indexes",
             "server_mode",
