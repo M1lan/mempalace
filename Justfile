@@ -65,11 +65,10 @@ menu:
 doctor:
     @'{{ helpers }}/doctor.bash'
 
-### comment by operator, leave it!
 # Machine-readable standard harness conformance gate.
-#[group('meta')]
-#harness-gate:
-#    @'{{ helpers }}/harness-gate.bash'
+[group('meta')]
+harness-gate:
+   @'{{ helpers }}/harness-gate.bash'
 
 # Lint helper Bash files.
 [group('lint')]
