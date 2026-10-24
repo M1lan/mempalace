@@ -7,7 +7,7 @@ set -u
 source "$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)/lib.bash"
 cd "$REPO_ROOT" || exit 1
 
-required=(bash just uv git rg fd jq shellcheck shfmt ast-grep mise betterhook codeidx)
+required=(bash just uv git rg fd jq shellcheck shfmt ast-grep betterhook codeidx)
 recommended=(gum fzf bat tokei rumdl)
 missing_required=0
 
@@ -32,7 +32,7 @@ done
 
 printf 'PROJECT\n'
 printf '  %-22s %s\n' 'installed cli' "$(fact_installed)"
-for path in Justfile .just/helpers mise.toml betterhook.toml sgconfig.yml; do
+for path in Justfile .just/helpers betterhook.toml sgconfig.yml; do
   if [[ -e $path ]]; then
     printf '  %-22s ok\n' "$path"
   else

@@ -34,12 +34,6 @@ else
   add_check justfile-system false "$just_lines Justfile lines" 'split recipes into .just/helpers and keep Justfile at 250 lines or fewer'
 fi
 
-if [[ -f mise.toml ]] && mise config get tools.python > /dev/null 2>&1; then
-  add_check mise true 'mise.toml loads' ''
-else
-  add_check mise false 'mise.toml missing or invalid' 'add valid mise.toml with project tool versions'
-fi
-
 betterhook_status=''
 if [[ -f betterhook.toml ]] && betterhook_status=$(betterhook status 2> /dev/null) && jq -e '.diagnostics | length == 0' <<< "$betterhook_status" > /dev/null; then
   add_check betterhook true 'betterhook.toml loads without diagnostics' ''
