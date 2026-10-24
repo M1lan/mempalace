@@ -31,6 +31,7 @@ for tool in "${recommended[@]}"; do
 done
 
 printf 'PROJECT\n'
+printf '  %-22s %s\n' 'installed cli' "$(fact_installed)"
 for path in Justfile .just/helpers mise.toml betterhook.toml sgconfig.yml; do
   if [[ -e $path ]]; then
     printf '  %-22s ok\n' "$path"

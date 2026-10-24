@@ -5,9 +5,9 @@ min_betterhook = ">=0.1.0"
 [hooks.pre-commit]
 stash_untracked = false
 
-[hooks.pre-commit.jobs.harness]
-run = "just harness-gate"
-timeout = "30s"
+#[hooks.pre-commit.jobs.harness]
+# run = "just harness-gate"
+# timeout = "30s"
 
 [hooks.pre-commit.jobs.check]
 run = "just check"

@@ -55,3 +55,21 @@ fact_dirty() {
     printf 'clean'
   fi
 }
+
+# Version of the installed uv tool, or the empty string when absent.
+installed_version() {
+  local line
+  has uv || return 0
+  line=$(NO_COLOR=1 uv tool list 2> /dev/null | rg -N '^mempalace v' | head -1) || return 0
+  printf '%s' "${line#mempalace v}"
+}
+
+fact_installed() {
+  local version
+  has uv || {
+    printf 'unknown (no uv)'
+    return
+  }
+  version=$(installed_version)
+  printf '%s' "${version:-not installed}"
+}

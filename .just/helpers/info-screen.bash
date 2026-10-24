@@ -11,4 +11,6 @@ printf 'MemPalace %s\n' "$(fact_version)"
 printf 'python    %s\n' "$(fact_python)"
 printf 'uv        %s\n' "$(uv --version 2> /dev/null || printf missing)"
 printf 'branch    %s (%s)\n' "$(fact_branch)" "$(fact_dirty)"
+printf 'installed %s\n' "$(fact_installed)"
+printf 'setup     just install | just update | just reinstall | just status\n'
 printf 'commands  just menu | just doctor | just verify\n'

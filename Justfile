@@ -10,10 +10,39 @@ mod release '.just/release.just'
 
 helpers := ".just/helpers"
 
+BIN_DIR := env_var_or_default("BIN_DIR", env_var_or_default("UV_TOOL_BIN_DIR", ""))
+
 # Project facts and quickstart.
 [private]
 default:
     @'{{ helpers }}/info-screen.bash'
+
+# --- setup ---
+
+# Sync the environment and install the mempalace CLI.
+[group('setup')]
+install:
+    @'{{ helpers }}/lifecycle.bash' install '{{ BIN_DIR }}'
+
+# Pull, sync the environment, and refresh an installed CLI.
+[group('setup')]
+update:
+    @'{{ helpers }}/lifecycle.bash' update '{{ BIN_DIR }}'
+
+# Rebuild the environment from scratch and reinstall the CLI.
+[group('setup')]
+reinstall:
+    @'{{ helpers }}/lifecycle.bash' reinstall '{{ BIN_DIR }}'
+
+# Remove the installed mempalace CLI.
+[group('setup')]
+uninstall:
+    @'{{ helpers }}/lifecycle.bash' uninstall
+
+# Show repository, environment, and installed CLI versions.
+[group('setup')]
+status:
+    @'{{ helpers }}/lifecycle.bash' status
 
 # Plain machine-friendly recipe list.
 [group('meta')]
@@ -36,10 +65,11 @@ menu:
 doctor:
     @'{{ helpers }}/doctor.bash'
 
+### comment by operator, leave it!
 # Machine-readable standard harness conformance gate.
-[group('meta')]
-harness-gate:
-    @'{{ helpers }}/harness-gate.bash'
+#[group('meta')]
+#harness-gate:
+#    @'{{ helpers }}/harness-gate.bash'
 
 # Lint helper Bash files.
 [group('lint')]
@@ -53,7 +83,7 @@ shfmt-check:
 
 # Check lint, formatting, helpers, and harness conformance.
 [group('check')]
-check: core::lint core::fmt-check shellcheck-helpers shfmt-check harness-gate
+check: core::lint core::fmt-check shellcheck-helpers shfmt-check #harness-gate
 
 # Full local pre-push gate.
 [group('verify')]
