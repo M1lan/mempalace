@@ -47,3 +47,5 @@ target/
 *.dylib
 *.exe
 
+.codegraph/
+.grepai/
