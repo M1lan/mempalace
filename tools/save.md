@@ -14,7 +14,7 @@ Behavior:
    it via the conversation context — look for `~/.claude/projects/` paths).
 2. Run via bash:
 
-   ```
+   ```text
    mempalace mine "<TRANSCRIPT_PATH>" --mode convos --wing claude_imports
    ```
 

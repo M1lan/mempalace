@@ -58,5 +58,5 @@ Set the `MEMPAL_DIR` environment variable to a directory path to automatically r
 
 ## Support
 
-- Repository: https://github.com/MemPalace/mempalace
-- Issues: https://github.com/MemPalace/mempalace/issues
+- Repository: <https://github.com/MemPalace/mempalace>
+- Issues: <https://github.com/MemPalace/mempalace/issues>

@@ -282,6 +282,7 @@ class PalaceRef:
 ```
 
 Rules:
+
 - `id` is always present. It is the key the backend uses to cache open handles.
 - Local-only backends read `local_path`. If `local_path is None` they raise `PalaceNotFoundError`.
 - Server-only backends read `namespace`. If `namespace is None` they derive one deterministically from `id`.
@@ -472,9 +473,11 @@ The sync subsystem is out of scope for this spec. What this spec defines:
 
 - `supports_sync` capability flag (§2.1) — a backend advertising it agrees to implement idempotent upserts under conflict and to expose change data.
 - Optional method on `BaseCollection`:
+
   ```python
   def changes_since(self, cursor: SyncCursor) -> Iterator[Change]: ...
   ```
+
 - Backends without `supports_change_feed` / `supports_sync` are rejected by the sync subsystem at bind time.
 
 Local single-user deployments never load the sync subsystem; non-sync-capable backends cost them nothing.
@@ -497,6 +500,7 @@ class TestPostgresBackend(AbstractBackendContractSuite):
 ```
 
 The suite covers:
+
 - Round-trip for every required method
 - Empty-result shape (outer dimension preserved, inner lists empty)
 - `create=False` on missing palace raises `PalaceNotFoundError`
@@ -560,7 +564,7 @@ The namespace UUID is fixed at spec v1 adoption and recorded here — once, for 
 
 ### 8.1 The CLI
 
-```
+```text
 mempalace migrate --palace PATH --from chroma --to postgres
 mempalace migrate --all --to lance
 ```
@@ -595,6 +599,7 @@ After migration, run `mempalace verify --palace PATH --against SOURCE_PATH --sou
 
 - `BaseBackend.spec_version` declares which spec version a backend implements.
 - MemPalace refuses to load a backend declaring a different major version. The failure is loud and names the mismatch, e.g.:
+
   ```python
   raise BackendVersionMismatchError(
       f"backend {name!r} targets spec {backend.spec_version!r}; "
@@ -602,6 +607,7 @@ After migration, run `mempalace verify --palace PATH --against SOURCE_PATH --sou
       f"Install a build of {name!r} that targets spec {CORE_MAJOR}.x."
   )
   ```
+
 - Minor versions are additive (new optional methods, new capability tokens). Backends declaring an older minor continue to work.
 - This is spec v1.0.
 
@@ -655,6 +661,7 @@ No remaining blockers. Genuinely additive future items (new optional methods, ne
 The original draft sequenced cleanup → spec → ChromaBackend → in-flight rebase → migrate CLI. In practice the contract surface and the first backends shipped together in [#1679](https://github.com/MemPalace/mempalace/pull/1679) ahead of this merge, so the remaining sequence is what's left, not the whole list.
 
 **Done (via #1679):**
+
 1. ✅ §10 seam cleanup (client imports routed through `BaseCollection`; typed-result migration §1.3).
 2. ✅ `BaseBackend` / `BaseCollection`, `PalaceRef`, capability tokens, entry-point/registry discovery.
 3. ✅ In-tree `pgvector`, `qdrant`, `sqlite_exact` backends + `tests/test_backend_conformance.py`.

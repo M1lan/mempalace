@@ -46,6 +46,7 @@ MCP tool: mempalace_diary_read
 ## How It Works
 
 Each named agent maps to its own wing in the palace:
+
 - `wing_reviewer` — the reviewer's diary, findings, patterns
 - `wing_architect` — the architect's decisions, tradeoffs
 - `wing_ops` — the ops agent's incidents, deploys

@@ -7,7 +7,7 @@ many minds. This guide takes you from zero to a working fleet.
 
 ## What you're building
 
-```
+```text
   mac-claude ──────┐  stdio auto-proxy          ┌─ mempalace serve
   mac-codex ───────┤  or HTTP (loopback)        │  (one host owns the palace)
                    ├───────────────────────────▶│
@@ -516,6 +516,7 @@ The same non-negotiables that govern memory govern coordination:
   curl -N https://memory.example.com/logstream/stream?stream=project/myapp \
     -H "Authorization: Bearer $MEMPALACE_MCP_HTTP_TOKEN"
   ```
+
 - **Read-only observers**: a hub started with `--read-only` exposes recall
   plus `event_list`, `event_wait`, and `artifact_get`; mutating tools —
   including `event_append`, `event_ack`, `artifact_put`, and

@@ -230,6 +230,7 @@ Reserved transformation names (v1):
 Adapters MAY define their own transformation names for behaviors the reserved list does not cover. Third-party names SHOULD be prefixed with the adapter name to avoid collisions (e.g., `cursor.composer_ordering`).
 
 **Capability derivation:**
+
 - `byte_preserving` — declared_transformations is empty AND output bytes equal input bytes for any source the adapter can read. Advertised via the `byte_preserving` capability (§2.1). MUST be verified by §7.2 round-trip test.
 - `declared_lossy` — declared_transformations is non-empty. The adapter's output is reproducible from source by applying *only* the declared transformations. MUST be verified by §7.3 declared-transformation test.
 
@@ -281,9 +282,11 @@ Closets are the AAAK-compressed index layer (`palace.build_closet_lines`, `upser
 
 - **Core builds closets** from adapter-yielded drawers as a post-step, via the existing `mempalace.palace` helpers. Adapters do not call these APIs.
 - **Adapters MAY emit closet hints** in drawer metadata via a flat `;`-joined string:
+
   ```python
   metadata["closet_hints"] = "decided GraphQL; migrated to Postgres; fixed PR-567"
   ```
+
   Core splits on `;` and feeds these as candidate topics alongside the content-scanned ones in `build_closet_lines`. The git adapter can hint decision-signal quotes that raw content-scanning would miss; the conversations adapter can hint section headers; the filesystem adapter has no need and omits the field.
 - **metadata_only drawers get closets too.** Core builds them from the synthesized description content the same way it builds closets for any other drawer. This is how #981's path-level descriptions become searchable.
 - **Closet purging** remains keyed on `source_file` (`purge_file_closets` in `mempalace/palace/closets.py`). Adapters' source_file values must be stable so purge is correct on re-ingest.
@@ -346,6 +349,7 @@ An adapter instance is long-lived and serves many mine operations. Adapters MUST
 Routing is the adapter's responsibility. The filesystem adapter reads `mempalace.yaml` (hall keywords, rooms list) via `MempalaceConfig()` and returns `RouteHint(wing=..., room=..., hall=...)` on each drawer. This relocates `detect_room()` and `detect_hall()` (currently in `miner.py` and `convo_miner.py`) into their respective adapters.
 
 Order of precedence for routing:
+
 1. Explicit `--wing` / `--room` CLI flags → passed through `SourceRef.options` → adapter honors verbatim.
 2. Palace config match (`mempalace.yaml` hall keywords, room keywords) → adapter computes.
 3. Adapter-internal fallback (e.g., filesystem adapter falls back to `"general"` room).
@@ -409,6 +413,7 @@ mempalace mine /path/to/project                        # implicit: filesystem (d
 The default when no `--source` is given is `filesystem`, preserving current `mempalace mine <path>` behavior.
 
 **Backwards compatibility with `--mode`.** Current `cli.py:517-519` exposes `--mode {projects,convos}`. This spec maps:
+
 - `--mode projects` → `--source filesystem` (the new default)
 - `--mode convos` → `--source conversations`
 

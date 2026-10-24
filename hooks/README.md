@@ -71,6 +71,7 @@ the bundled plugin cannot, which is why the hook backgrounds rather than
 mining in the foreground.
 
 Make them executable:
+
 ```bash
 chmod +x hooks/mempal_save_hook.sh hooks/mempal_session_end_hook.sh hooks/mempal_precompact_hook.sh hooks/mempal_hook_run.sh
 ```
@@ -134,6 +135,7 @@ behavior. `mempalace hook run` owns that:
 To keep hooks installed but disable auto-save blocking entirely, set `hooks.auto_save` to `false` in your config:
 
 **Option 1 — config file** (`~/.mempalace/config.json`):
+
 ```json
 {
   "hooks": {
@@ -143,6 +145,7 @@ To keep hooks installed but disable auto-save blocking entirely, set `hooks.auto
 ```
 
 **Option 2 — environment variable:**
+
 ```bash
 export MEMPALACE_HOOKS_AUTO_SAVE=false
 ```
@@ -172,12 +175,14 @@ Prefer the plugin in `.claude-plugin/`, which calls the same command.
 ## Debugging
 
 Check the hook log:
+
 ```bash
 cat ~/.mempalace/hook_state/hook.log
 ```
 
 Example output:
-```
+
+```text
 [14:30:15] Session abc123: 12 exchanges, 12 since last save
 [14:35:22] Session abc123: 15 exchanges, 15 since last save
 [14:35:22] TRIGGERING SAVE at exchange 15
@@ -207,6 +212,7 @@ mempalace mine ~/.claude/projects/ --mode convos
 This scans all JSONL transcripts from previous sessions and files them into the `conversations` wing. On a typical developer machine with months of history, this can yield 50K–200K drawers.
 
 For Codex CLI sessions:
+
 ```bash
 mempalace mine ~/.codex/sessions/ --mode convos
 ```

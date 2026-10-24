@@ -11,7 +11,7 @@
 
 Adds a third miner alongside the existing two:
 
-```
+```text
 mempalace mine <dir>                  → miner.py        (project files: code, docs, notes)
 mempalace mine <dir> --mode convos    → convo_miner.py  (chat exports)
 mempalace mine <dir> --mode extract   → format_miner.py (binary office documents)   ← NEW
@@ -41,7 +41,7 @@ Both libraries are **optional** runtime dependencies. Users who only mine projec
 
 Same architectural principle as virtual line numbering (the other 3.3.6 feature in this package): **transform at read time, leave storage untouched.**
 
-```
+```text
 PDF on disk → (read bytes into memory) → MarkItDown → Markdown text → existing chunker → drawers in ChromaDB
 ```
 
@@ -126,6 +126,7 @@ Identical to the helper in the terminal-session normalizer. UTF-8 first, CP1252 
 ### `is_icloud_dataless(path: Path) -> bool`
 
 Two signals:
+
 1. Literal `.icloud` suffix (iCloud's offloaded-file placeholder convention)
 2. macOS `st_flags` dataless bit (`0x40000000`) — best-effort, gracefully degrades on non-macOS
 
@@ -178,7 +179,7 @@ That's the entire CLI change. Two argparse edits + one `elif` branch.
 
 Run on a local test directory containing **52 `.rtf` files + 11 `.pdf` files** (a mix of long-form correspondence and research/architecture documents, no synthetic fixtures):
 
-```
+```text
 Supported formats: ['.docx', '.epub', '.pdf', '.pptx', '.rtf', '.xlsx']
 scan_formats: found 63 supported files
 ```
@@ -200,6 +201,7 @@ Anti-regression assertion: **zero raw `\rtf1` / `\ansi` control codes leak into 
 
 - **No changes to existing miners.** `miner.py` and `convo_miner.py` are not touched.
 - **No new required dependencies.** MarkItDown and striprtf are optional extras (`pip install markitdown striprtf` or `pip install mempalace[extract]` if declared as such in `pyproject.toml`). MarkItDown requires Python ≥ 3.10; striprtf works on 3.6+. Recommended pyproject entries use environment markers so 3.9 users automatically get only striprtf:
+
   ```toml
   [project.optional-dependencies]
   extract = [
@@ -207,6 +209,7 @@ Anti-regression assertion: **zero raw `\rtf1` / `\ansi` control codes leak into 
       "markitdown>=0.1.5; python_version >= '3.10'",
   ]
   ```
+
 - **No on-disk format changes.** Drawers / closets / halls have the exact same shape regardless of which miner produced them.
 - **No migration step.** Users who already have a palace mined from the other modes can run `mempalace mine --mode extract ~/docs/` and the new drawers land in the same palace, same wing, same room conventions.
 - **Optional `--max-file-size` flag** can be added to `mempalace mine` so users with legitimate large files (e.g. scanned books) can raise the cap from the 500 MB default.

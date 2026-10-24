@@ -81,6 +81,7 @@ Add a `PreCompress` hook to `~/.gemini/settings.json`:
 ```
 
 Make sure the hook scripts are executable:
+
 ```bash
 chmod +x hooks/*.sh
 ```
@@ -88,6 +89,7 @@ chmod +x hooks/*.sh
 ## Usage
 
 Once connected, Gemini CLI will automatically:
+
 - Start the MemPalace server on launch
 - Use `mempalace_search` to find relevant past discussions
 - Use the `PreCompress` hook to save memories before context compression
@@ -95,6 +97,7 @@ Once connected, Gemini CLI will automatically:
 ### Manual Mining
 
 Mine existing code or docs:
+
 ```bash
 uv run python -m mempalace mine /path/to/your/project
 ```
@@ -102,5 +105,6 @@ uv run python -m mempalace mine /path/to/your/project
 ### Verification
 
 In a Gemini CLI session:
+
 - `/mcp list` — verify `mempalace` is `CONNECTED`
 - `/hooks panel` — verify the `PreCompress` hook is active

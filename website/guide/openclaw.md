@@ -4,7 +4,7 @@ MemPalace provides an official skill for [OpenClaw](https://github.com/openclaw/
 
 ## Installation
 
-The skill is built right into the `integrations/openclaw` directory of MemPalace. 
+The skill is built right into the `integrations/openclaw` directory of MemPalace.
 
 You can add MemPalace as an MCP server to OpenClaw via the CLI:
 
@@ -28,6 +28,7 @@ Or by directly editing your OpenClaw configuration:
 ## How It Works
 
 Once connected, OpenClaw agents receive all 47 tools along with the **Memory Protocol**—a strict behavioral guide indicating they should:
+
 1. **Never guess**: Query `mempalace_search` or `mempalace_kg_query` before confidently answering.
 2. **Keep an agent diary**: Maintain continuity between sessions by writing to `mempalace_diary_write`.
 3. **Manage the Knowledge Graph**: Update declarative facts when things change using `mempalace_kg_add` and `mempalace_kg_invalidate`.

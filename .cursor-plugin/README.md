@@ -29,7 +29,7 @@ Once published, install via the Cursor marketplace panel and select `mempalace`.
 
 After installing the plugin, run the `init` command in a Cursor chat:
 
-```
+```text
 /mempalace-init
 ```
 

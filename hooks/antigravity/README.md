@@ -35,7 +35,7 @@ bash hooks/antigravity/install.sh --uninstall
 
 ## What gets installed
 
-```
+```text
 ~/.gemini/config/plugins/mempalace/
 ├── plugin.json                              # marker manifest
 ├── mcp_config.json                          # registers mempalace-mcp
@@ -138,7 +138,7 @@ canonical UX and what we recommend.
    `mempalace-mcp` / `mempalace` console-script shebang on `$PATH`,
    then `python3`. A failed probe logs:
 
-   ```
+   ```text
    ERROR: mempalace is not runnable via <python> -m mempalace; install mempalace or set MEMPAL_PYTHON
    ```
 

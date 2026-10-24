@@ -27,7 +27,7 @@ The Python package that powers MemPalace. All modules, all logic.
 
 ## Architecture
 
-```
+```text
 User → CLI → miner/convo_miner → ChromaDB (palace)
                                      ↕
                               knowledge_graph (SQLite)

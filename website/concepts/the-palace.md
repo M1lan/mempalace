@@ -74,7 +74,7 @@ Halls are the conceptual categories that describe how related memories connect *
 
 Connections *between* wings. When the same room appears in different wings, the graph layer can treat that as a cross-wing connection.
 
-```
+```text
 wing_kai       / hall_events / auth-migration  → "Kai debugged the OAuth token refresh"
 wing_driftwood / hall_facts  / auth-migration  → "team decided to migrate auth to Clerk"
 wing_priya     / hall_advice / auth-migration  → "Priya approved Clerk over Auth0"

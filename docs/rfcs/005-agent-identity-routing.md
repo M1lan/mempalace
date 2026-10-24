@@ -26,7 +26,7 @@ The shared brain identifies each agent by a flat name — `mac-claude`,
 **rendered into** the agent's instructions by a managed block MemPalace writes
 to `~/.claude/CLAUDE.md`:
 
-```
+```text
 <!-- mempalace-shared-brain:start -->
 ## MemPalace shared brain
 You share a MemPalace hub with other agents. Your agent identity is
@@ -96,7 +96,7 @@ workspace, and local configuration are actually shared. Same box + same project
 
 ## The Identity Tuple
 
-```
+```text
 host : agent : project
 ```
 
@@ -173,7 +173,7 @@ Two choices live in the backend/hub and are resolved here so downstream
 consumers (PalaceMind's viewer, the renderer, other agents) can build against a
 fixed contract.
 
-### Decision 1 — Matcher: **no change.** Route the tuple as an opaque string.
+### Decision 1 — Matcher: **no change.** Route the tuple as an opaque string
 
 `to_agent` matching stays exactly as RFC 003 defines it:
 
@@ -197,7 +197,7 @@ RFC ships as a **convention + one renderer change**, with zero risk to the
 routing hot path. If hierarchical routing is later wanted, it is additive: a new
 optional match mode, not a migration.
 
-### Decision 2 — Order: **`host:agent:project`** (host-first).
+### Decision 2 — Order: **`host:agent:project`** (host-first)
 
 *Rationale.* Host-first matches how the fleet's names already read
 (`mac-*`, `windows-*`, `blade-*` are host-then-agent), so migration is a pure

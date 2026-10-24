@@ -12,10 +12,12 @@ mempalace wake-up > context.txt
 ```
 
 This gives your local model a bounded wake-up context, typically around **~600-900 tokens** in the current implementation. It includes:
+
 - **Layer 0**: Your identity — who you are, what you work on
 - **Layer 1**: Top moments from the palace — key decisions, recent work
 
 For project-specific context:
+
 ```bash
 mempalace wake-up --wing driftwood > context.txt
 ```
@@ -64,6 +66,7 @@ AAAK is readable by any LLM that reads text — Claude, GPT, Gemini, Llama, Mist
 ## Full Offline Stack
 
 The core memory stack can run offline:
+
 - **ChromaDB** on your machine — vector storage and search
 - **Local model** on your machine — reasoning and responses
 - **AAAK** for compression — optional, no cloud dependency

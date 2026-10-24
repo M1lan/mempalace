@@ -68,7 +68,7 @@ uv run pytest tests/benchmarks/ -v --bench-scale=stress -m stress
 
 ## Architecture
 
-```
+```text
 tests/benchmarks/
   conftest.py              # --bench-scale / --bench-report CLI options, fixtures, markers
   data_generator.py        # Deterministic data factory (seeded RNG, planted needles)

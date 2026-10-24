@@ -19,6 +19,7 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 ## MCP Tools (19)
 
 ### Palace (read)
+
 - mempalace_status -- Palace status and stats
 - mempalace_list_wings -- List all wings
 - mempalace_list_rooms -- List rooms in a wing
@@ -28,11 +29,13 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 - mempalace_get_aaak_spec -- Get the AAAK specification
 
 ### Palace (write)
+
 - mempalace_add_drawer -- Add a new memory (drawer)
 - mempalace_checkpoint -- Save a whole session in one call (dedup + file + diary)
 - mempalace_delete_drawer -- Delete a memory (drawer)
 
 ### Knowledge Graph
+
 - mempalace_kg_query -- Query the knowledge graph
 - mempalace_kg_add -- Add a knowledge graph entry
 - mempalace_kg_invalidate -- Invalidate a knowledge graph entry
@@ -40,11 +43,13 @@ AI memory system. Store everything, find anything. Local, free, no API key.
 - mempalace_kg_stats -- Knowledge graph statistics
 
 ### Navigation
+
 - mempalace_traverse -- Traverse the palace structure
 - mempalace_find_tunnels -- Find cross-wing connections
 - mempalace_graph_stats -- Graph connectivity statistics
 
 ### Agent Diary
+
 - mempalace_diary_write -- Write a diary entry
 - mempalace_diary_read -- Read diary entries
 

@@ -8,7 +8,7 @@ Contradiction detection is a planned capability, not a shipped end-to-end featur
 
 Checks assertions against entity facts in the knowledge graph. When enabled, it catches contradictions like:
 
-```
+```text
 Input:  "Soren finished the auth migration"
 Output: 🔴 AUTH-MIGRATION: attribution conflict — Maya was assigned, not Soren
 
@@ -22,6 +22,7 @@ Output: 🟡 SPRINT: stale_date — current sprint ends Thursday (updated 2 days
 ## How It Works
 
 Facts are checked against the knowledge graph:
+
 - **Attribution conflicts** — the wrong person credited for a task
 - **Temporal errors** — wrong dates, tenures, or durations
 - **Stale information** — facts that have been superseded

@@ -97,6 +97,7 @@ Neither function reads or writes the palace. They take strings, return strings. 
 The 21 tests in `tests/test_line_numbers.py` exercise:
 
 **`render_with_line_numbers`**
+
 - Empty string → `""`
 - `None` → `""`
 - Single line
@@ -110,6 +111,7 @@ The 21 tests in `tests/test_line_numbers.py` exercise:
 - Input not mutated
 
 **`extract_line_range`**
+
 - Single-line extraction
 - Inclusive range
 - Full-document extraction
@@ -129,7 +131,7 @@ All 21 pass on Python 3.9 / pytest 8.4.2 in 0.01s. See `PROOF.md` for verbatim r
 
 Drop the two functions at module level, alongside the existing helpers (`_tokenize`, `_bm25_scores`, `_hybrid_rank`). They have no dependencies beyond `re` (already imported).
 
-In the existing `search()` and `search_memories()` flows, when a result row carries explicit `line_start` / `line_end` metadata (e.g. from a closet pointer), pass the drawer text through `extract_line_range` before returning. When a result has no explicit range (BM25 / vector hit on the full drawer body), pass it through `render_with_line_numbers` instead. Both behaviors are additive — existing callers that ignore line numbers get the same string back, just with a `[N] ` prefix per line.
+In the existing `search()` and `search_memories()` flows, when a result row carries explicit `line_start` / `line_end` metadata (e.g. from a closet pointer), pass the drawer text through `extract_line_range` before returning. When a result has no explicit range (BM25 / vector hit on the full drawer body), pass it through `render_with_line_numbers` instead. Both behaviors are additive — existing callers that ignore line numbers get the same string back, just with a `[N]` prefix per line.
 
 No new dependencies. No changes to drawer storage. No migration step.
 

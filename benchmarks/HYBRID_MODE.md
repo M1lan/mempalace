@@ -18,6 +18,7 @@ The raw mode (`--mode raw`) gets **96.6% R@5** on LongMemEval. That's already ex
 **1. Specific nouns that embeddings underweight.**
 
 Examples of questions that failed in raw mode but pass in hybrid:
+
 - "What degree did I graduate with?" → answer: "Business Administration" — semantically generic, but the exact phrase is findable via keyword match
 - "What kitchen appliance did I buy?" → answer: "stand mixer" — generic appliance question, but "stand mixer" is a specific retrievable string
 - "Where did I study abroad?" → answer: "Melbourne" — city names embed poorly when surrounded by many generic context words
@@ -35,9 +36,11 @@ Questions like "What was the significant business milestone I mentioned four wee
 Two stages, no LLM calls, no added dependencies:
 
 ### Stage 1: Semantic retrieval (same as raw)
+
 Query ChromaDB with the question text. Retrieve **top 50** candidates (raw uses 10, hybrid uses 50 to give stage 2 more to work with).
 
 ### Stage 2: Keyword re-ranking
+
 Extract meaningful keywords from the question (strip stop words). For each retrieved document, compute keyword overlap score. Apply a **distance reduction** proportional to overlap:
 
 ```python
@@ -45,18 +48,22 @@ fused_dist = dist * (1.0 - 0.30 * overlap)
 ```
 
 **Breaking this formula down:**
+
 - `dist` — ChromaDB cosine distance (lower = better match)
 - `overlap` — fraction of question keywords found in the document (0.0 to 1.0)
 - `0.30` — the boost weight: up to 30% distance reduction for perfect keyword overlap
 
 **Example:**
+
 - Document A: dist=0.45, overlap=0.0 → fused=0.450 (no change)
 - Document B: dist=0.52, overlap=1.0 → fused=0.364 (30% better — jumps ahead of A)
 
 After re-ranking, sort by fused_dist ascending. The final ranked list is returned.
 
 ### Stop word list
+
 The keyword extractor strips common words that add noise:
+
 ```python
 STOP_WORDS = {
     "what", "when", "where", "who", "how", "which", "did", "do",
@@ -113,6 +120,7 @@ results = semantic_search(full_text_collection, question, top_k=5)
 This gives assistant-reference questions a full-text index to search, without polluting the global index that semantic questions depend on.
 
 Detection heuristic:
+
 ```python
 triggers = ["you suggested", "you told me", "you mentioned", "you said",
             "you recommended", "remind me what you", "you provided",
@@ -148,6 +156,7 @@ All the v1 keyword re-ranking applied on top of fixes 1 and 2.
 **Diary result (98.2%) is with 65% cache coverage only** — 35% of sessions had no diary context. Full-coverage result pending (cache building overnight). The partial result shows the diary layer can introduce noise when only partially applied; full coverage result expected to be ≥99.4%.
 
 Per-type R@5 breakdown (hybrid v3 + LLM rerank):
+
 - knowledge-update: **100%** (n=78)
 - multi-session: **100%** (n=133)
 - single-session-user: **100%** (n=70)
@@ -160,6 +169,7 @@ Per-type R@5 breakdown (hybrid v3 + LLM rerank):
 **Only 3 questions remain unresolved out of 500.**
 
 Hybrid v3 fixed the preference and assistant failures that v2 left behind:
+
 - preference: 93.3% → **96.7%** (synthetic preference docs bridged the vocabulary gap)
 - assistant: 96.4% → **98.2%** (expanded top-20 rerank pool caught rank-11-12 sessions)
 - temporal: 98.5% → **99.2%**
@@ -244,6 +254,7 @@ python benchmarks/longmemeval_bench.py /tmp/longmemeval-data/longmemeval_s_clean
 ```
 
 **Run time:**
+
 - hybrid_v2 (local): ~200s for full 500 on Apple Silicon
 - hybrid_v2 + LLM rerank: ~620s (~10 min) — adds ~0.8s per question for Haiku API call
 - palace (local): ~280s — slightly slower due to two-pass hall navigation
@@ -257,7 +268,7 @@ Palace mode is a structural upgrade that uses the full MemPal hall/wing/closet/d
 
 ### The Palace Structure
 
-```
+```text
 PALACE
   └── HALL (content type: preferences / facts / events / assistant_advice / general)
         └── CLOSET (user turns per session — the primary index)
@@ -286,6 +297,7 @@ Sessions found in Pass 1 are "hall-validated" — they appear in both the tight 
 
 **Pass 2 — Full haystack with hall-aware scoring:**
 Search all sessions with hybrid scoring, plus:
+
 - 25% distance reduction for sessions in the primary hall (strong signal)
 - 10% distance reduction for sessions in secondary halls
 - 15% extra reduction for sessions that were hall-validated in Pass 1 (double confirmation)
@@ -324,7 +336,8 @@ prompt = (
 ```
 
 A synthetic document is added to the ChromaDB collection with the **same corpus_id**:
-```
+
+```text
 "Session topics: yoga classes, Tuesday routine, workout schedule. Summary: ..."
 ```
 
@@ -388,7 +401,7 @@ PREF_PATTERNS = [
 
 For sessions where preferences are extracted, a synthetic document is added to ChromaDB alongside the session document — with the **same corpus_id**:
 
-```
+```text
 "User has mentioned: battery life issues on phone; looking at phone upgrade options"
 ```
 
@@ -412,7 +425,8 @@ In `locomo_bench.py`, `--llm-rerank` only reorders IDs already selected by the t
 ```
 
 **The prompt (minimal by design):**
-```
+
+```text
 Question: {question}
 
 Below are 10 conversation sessions from someone's memory. Which single session
@@ -435,6 +449,7 @@ Asking for a full ranking increases prompt complexity and error rate. Picking th
 If the API call fails (timeout, rate limit, no key), the function catches the exception and returns the original hybrid_v2 ranking unchanged. The benchmark never crashes due to the LLM pass.
 
 **Key loading priority:**
+
 1. `--llm-key` CLI flag
 2. `ANTHROPIC_API_KEY` environment variable
 
@@ -456,6 +471,7 @@ def _fresh_collection(name="mempal_drawers"):
 ```
 
 Benefits:
+
 - No temp files, no SQLite handles accumulating
 - ~2x faster per question (no disk I/O)
 - Full 500 runs without splitting
@@ -509,7 +525,7 @@ The 5 remaining failures include at least 2 that are arguably ambiguous — the 
 
 ## File Map
 
-```
+```text
 benchmarks/
   longmemeval_bench.py                         — main benchmark + all modes
   locomo_bench.py                              — LoCoMo benchmark (top-k default now 50)

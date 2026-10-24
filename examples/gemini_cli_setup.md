@@ -40,6 +40,7 @@ uv run python -m mempalace init .
 ```
 
 ### Identity and Wings (Optional but Recommended)
+
 You can manually define who you are and what projects you work on by creating/editing these files in `~/.mempalace/`:
 
 - **`~/.mempalace/identity.txt`**: A plain text file describing your role and focus.
@@ -52,6 +53,7 @@ Register MemPalace as an MCP server so Gemini CLI can use its tools.
 ```bash
 gemini mcp add mempalace /absolute/path/to/mempalace/.venv/bin/python3 -m mempalace.mcp_server --scope user
 ```
+
 *Note: Use the absolute path to ensure it works from any directory.*
 
 ## 4. Enable Auto-Saving (Hooks)
@@ -79,6 +81,7 @@ Edit your `~/.gemini/settings.json` and add the following:
 ```
 
 Make sure the hook scripts are executable:
+
 ```bash
 chmod +x hooks/*.sh
 ```
@@ -86,17 +89,22 @@ chmod +x hooks/*.sh
 ## 5. Usage
 
 Once connected, Gemini CLI will automatically:
+
 - Start the MemPalace server on launch.
 - Use `mempalace_search` to find relevant past discussions.
 - Use the `PreCompress` hook to save new memories before they are lost.
 
 ### Manual Mining
+
 If you want the AI to learn from your existing code or docs immediately, run the "mine" command:
+
 ```bash
 uv run python -m mempalace mine /path/to/your/project
 ```
 
 ### Verification
+
 In a Gemini CLI session, you can run:
+
 - `/mcp list`: Verify `mempalace` is `CONNECTED`.
 - `/hooks panel`: Verify the `PreCompress` hook is active.

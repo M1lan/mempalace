@@ -6,7 +6,7 @@ MemPalace includes a temporal entity-relationship graph — like Zep's Graphiti,
 
 Entity-relationship triples with temporal validity:
 
-```
+```text
 Subject → Predicate → Object [valid_from → valid_to]
 ```
 
@@ -90,12 +90,14 @@ Through the MCP server, the knowledge graph is available as tools:
 The knowledge graph uses SQLite with two tables:
 
 **`entities`** — people, projects, tools, concepts:
+
 - `id` — lowercase normalized name
 - `name` — display name
 - `type` — person, project, tool, concept, etc.
 - `properties` — JSON blob for extra metadata
 
 **`triples`** — relationships between entities:
+
 - `subject` → `predicate` → `object`
 - `valid_from` — when this became true
 - `valid_to` — when it stopped being true (NULL = still current)

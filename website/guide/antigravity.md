@@ -247,7 +247,7 @@ Two common causes:
 2. **The resolved Python can't import `mempalace`.** Look for this
    line in `~/.mempalace/hook_state/antigravity_hook.log`:
 
-   ```
+   ```text
    ERROR: mempalace is not runnable via <python> -m mempalace; install mempalace or set MEMPAL_PYTHON
    ```
 

@@ -84,7 +84,7 @@ fleet (logstream correlation `rfc004_replicated_palace_position`):
 
 ## Architecture Overview
 
-```
+```text
   Machine A (mac)                Machine B (windows)          Machine C (laptop)
   ┌─────────────────────┐        ┌─────────────────────┐      ┌──────────────────┐
   │ agents → 127.0.0.1  │        │ agents → 127.0.0.1  │      │ agents → local   │
@@ -142,7 +142,7 @@ about sockets leaks up.
 
 Layer 2 sees peers only through this interface — the entire contract:
 
-```
+```text
 Transport {
   self(): ReplicaId                      // stable, = mesh node identity
   peers(): Map<ReplicaId, Presence>      // membership + liveness snapshot

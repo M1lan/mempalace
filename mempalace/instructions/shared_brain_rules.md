@@ -11,6 +11,7 @@ impersonate another agent. Never mint a second harness suffix to split
 windows — parallel lanes use topic, not a forged identity.
 
 Memory (recall + writing):
+
 - Before answering about past work, decisions, people, or projects,
   search the palace (mempalace_search; mempalace_kg_query for
   relational/temporal facts). Quote results verbatim — never paraphrase
@@ -22,6 +23,7 @@ Memory (recall + writing):
   tokens.
 
 Coordination (logstream):
+
 - Chat sessions are declared-idle until a coordination loop starts.
   Do not arm a background watcher at session start. Focus on the user's
   request first; engage the logstream when collaborating, delegating,

@@ -43,6 +43,7 @@ non-default backend is opt-in.
 | `milvus` | Local (Lite) · Server opt-in | `mempalace[milvus]` | ✓ | ✓ | `MEMPALACE_MILVUS_URI` |
 | `qdrant` | Server (REST) | bundled | ✓ | ✓ | `MEMPALACE_QDRANT_URL` |
 | `pgvector` | Server (Postgres) | `mempalace[pgvector]` | ✓ | ✓ | `MEMPALACE_PGVECTOR_DSN` |
+
 <!-- New backends add one row here and one `### <Backend>` subsection (with its connection variables) below; keep README's compatibility table in sync. -->
 
 Select a backend with `--backend <name>` on any `mempalace` / `mempalace-mcp`
@@ -129,11 +130,11 @@ drops out of the table name and every node resolves the same tables.
 
 - Leave it unset for a single-machine palace — naming is unchanged and existing
   palaces need no migration.
-- Setting it on a palace that already has data points at *new*, empty tables;
+- Setting it on a palace that already has data points at _new_, empty tables;
   MemPalace refuses to open the palace rather than appear to lose data, so
   choose the namespace before you mine.
 - Every palace that shares a namespace shares its memory, including two palaces
-  on the *same* machine. The setting declares "these are one logical palace", so
+  on the _same_ machine. The setting declares "these are one logical palace", so
   give anything that must stay separate its own namespace.
 - Allowed characters are letters, digits and `_ - . / :` or spaces; the value is
   lower-cased and runs of separators fold to a single `_`, so `Team-A`,
@@ -182,6 +183,7 @@ codes (`{"entities": {"Kai": "KAI"}}`). `init` never overwrites a file in that
 format.
 
 Wings are auto-detected during `mempalace init` from:
+
 - Directory names → project wings
 - Detected people in file content → person wings
 - Explicit `--wing` flag on mine commands

@@ -27,7 +27,7 @@ mempalace migrate-wings --dry-run --palace /path/to/palace
 The plan lists each rename and flags collisions that will **merge** into an
 existing wing:
 
-```
+```text
   Wing-name migration plan:
     '_home_user_proj' -> 'home_user_proj': 1284 drawer(s), 96 closet(s)  (MERGE into existing wing)
 ```

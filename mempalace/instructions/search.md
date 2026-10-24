@@ -6,6 +6,7 @@ When the user wants to search their MemPalace memories, follow these steps:
 
 Extract the core search intent from the user's message. Identify any explicit
 or implicit filters:
+
 - Wing -- a top-level category (e.g., "work", "personal", "research")
 - Room -- a sub-category within a wing
 - Keywords / semantic query -- the actual search terms
@@ -65,6 +66,7 @@ If MCP tools are not available, fall back to the CLI:
 ## 5. Present Results
 
 When presenting search results:
+
 - Always include source attribution: wing, room, and drawer for each result
 - Show relevance or similarity scores if available
 - Group results by wing/room when returning multiple hits
@@ -74,6 +76,7 @@ When presenting search results:
 
 If the results answer the question, stop. When more context is needed, offer
 relevant options to go deeper:
+
 - Drill deeper -- search within a specific room or narrow the query
 - Traverse -- explore the knowledge graph from a related room
 - Check tunnels -- look for cross-wing connections if the topic spans domains

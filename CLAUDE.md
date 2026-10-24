@@ -61,7 +61,7 @@ uv run ruff format --check .
 
 ## Project Structure
 
-```
+```text
 mempalace/
 ├── mcp_server/          # MCP server package — tools, schemas, protocol, transports
 ├── cli/                 # CLI package — commands, parser; public import is still mempalace.cli
@@ -105,7 +105,7 @@ hooks/                   # Claude Code hook scripts
 
 ## Architecture
 
-```
+```text
 User → CLI / MCP Server → Storage Backend (ChromaDB default, pluggable)
                         → SQLite (knowledge graph)
 

@@ -7,7 +7,7 @@ This directory is the source of truth for what gets installed at
 
 ## Layout
 
-```
+```text
 .antigravity-plugin/
 ├── plugin.json            # marker manifest (verified minimal schema)
 ├── mcp_config.json        # auto-registers the mempalace-mcp stdio server

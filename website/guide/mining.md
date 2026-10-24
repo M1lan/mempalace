@@ -15,6 +15,7 @@ mempalace mine ~/projects/myapp
 Each file becomes a drawer, tagged with a wing (project name) and room (topic). Rooms are auto-detected from your folder structure during `mempalace init`.
 
 Options:
+
 ```bash
 # Override wing name
 mempalace mine ~/projects/myapp --wing myapp
@@ -41,6 +42,7 @@ mempalace mine ~/chats/ --mode convos
 ```
 
 Supports five chat formats automatically:
+
 - Claude JSON exports
 - ChatGPT exports
 - Slack exports
@@ -56,6 +58,7 @@ mempalace mine ~/chats/ --mode convos --extract general
 ```
 
 Memory types:
+
 - **Decisions** — choices made, options rejected
 - **Preferences** — habits, likes, opinions
 - **Milestones** — sessions completed, goals reached
@@ -95,6 +98,7 @@ mempalace mine ~/chats/helios/ --mode convos --wing helios
 ```
 
 Six months later:
+
 ```bash
 # Project-specific search
 mempalace search "database decision" --wing orion
@@ -114,6 +118,7 @@ mempalace mine ~/.claude/projects/ --mode convos
 ```
 
 Then search across people and projects:
+
 ```bash
 mempalace search "Soren sprint" --wing driftwood
 # → 14 closets: OAuth refactor, dark mode, component library migration

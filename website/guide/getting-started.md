@@ -70,6 +70,7 @@ mempalace mine ~/chats/ --mode convos --extract general
 ```
 
 Two mining modes plus one extraction strategy:
+
 - **projects** — code and docs, auto-detected rooms
 - **convos** — conversation exports, chunked by exchange pair
 - **general extraction** — an `--extract general` option for conversation mining that classifies content into decisions, preferences, milestones, problems, and emotional context

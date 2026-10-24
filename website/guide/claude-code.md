@@ -14,6 +14,7 @@ Restart Claude Code, then type `/skills` to verify "mempalace" appears.
 ## How It Works
 
 With the plugin installed, Claude Code automatically:
+
 - Starts the MemPalace MCP server on launch
 - Has access to all 47 tools
 - Learns the AAAK dialect and memory protocol from the `mempalace_status` response

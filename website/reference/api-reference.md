@@ -33,6 +33,7 @@ Programmatic search returning a dict. Used by the MCP server.
 | `n_results` | `int` | `5` | Maximum number of results |
 
 **Returns:**
+
 ```python
 {
     "query": str,
@@ -200,6 +201,7 @@ Use `invalidate` for facts that simply ended, and `add_triple` for facts that ca
 Build the palace graph from ChromaDB metadata.
 
 **Returns:**
+
 - `nodes`: `dict` of `{room: {wings: list, halls: list, count: int, dates: list}}`
 - `edges`: `list` of `{room, wing_a, wing_b, hall, count}`
 

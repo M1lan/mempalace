@@ -59,7 +59,7 @@ entry, proving the shape matches and the binary is on PATH.
 > A plugin is a directory containing a `plugin.json` file and optional
 > subdirectories for different customization types:
 >
-> ```
+> ```text
 > plugins/<plugin-name>/
 > ├── plugin.json       # Required marker file
 > ├── mcp_config.json   # Optional MCP server definitions
@@ -121,6 +121,7 @@ hooks together.
 > points during Antigravity's execution loop.
 
 `hooks.json` lives at one of:
+
 - `~/.gemini/config/hooks.json` (global)
 - `<workspace>/.agents/hooks.json` (workspace)
 - `<plugin-root>/hooks.json` (per-plugin) — what we ship

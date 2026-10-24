@@ -6,6 +6,7 @@ When the user invokes this skill, follow these steps:
 
 Ask the user what they want to mine and where the source data is located.
 Clarify:
+
 - Is it a project directory (code, docs, notes)?
 - Is it conversation exports (Claude, ChatGPT, Slack)?
 - Do they want auto-classification (decisions, milestones, problems)?
@@ -52,6 +53,7 @@ If the user wants to organize mined content under a specific wing, add the
 
 Run the selected mining command and display progress as it executes. After
 completion, summarize the results including:
+
 - Number of items mined
 - Categories or classifications applied
 - Any warnings or skipped files
@@ -59,6 +61,7 @@ completion, summarize the results including:
 ## 6. Suggest next steps
 
 After mining completes, suggest the user try:
+
 - /mempalace:search -- search the newly mined content
 - /mempalace:status -- check the current state of their palace
 - Mine more data from additional sources

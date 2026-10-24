@@ -58,6 +58,7 @@ data, then ask:
 
 > Wings `acme-app` (31 drawers) and `acme_app` (158 drawers) are one
 > project. Which should survive?
+>
 > 1. Merge into `acme_app` (Recommended: the larger one, and the
 >    underscore form matches how `init` normalizes names)
 > 2. Merge into `acme-app`
@@ -80,6 +81,7 @@ Same question shape, per group, scoped to the wing(s) named in the finding:
 
 > In wing `mempalace`, rooms `release-3.6.0` and `release_3_6_0` are one
 > room. Merge into which?
+>
 > 1. `release-3.6.0` (Recommended: hyphenated slugs are the documented
 >    room convention)
 > 2. `release_3_6_0`
@@ -96,6 +98,7 @@ These are **not scored** because siblings like `mempalace` / `mempalace-ts`
 are often legitimately separate. Ask per pair:
 
 > `arcade` (2 drawers) and `arcade_game` (36 drawers): same project?
+>
 > 1. Yes, merge into `arcade_game` (Recommended: keeps the fuller wing)
 > 2. Yes, merge into `arcade`
 > 3. No, separate projects
@@ -110,6 +113,7 @@ project wings are usually a test mine. Ask per group:
 
 > Six wings hold one to three drawers each and are named after agent
 > identities. What should happen to them?
+>
 > 1. Move their drawers into a shared wing such as `shared_agent_brain`
 >    (Recommended)
 > 2. Leave them; they are intentional
@@ -128,6 +132,7 @@ reaches; `tunnels.unlinked_wings` lists the rest. If `tunnels.artifacts` is
 non-zero, ask:
 
 > 5 of 28 tunnels link generic tokens or a wing that no longer exists.
+>
 > 1. Run `mempalace tunnels prune` then `--yes` (Recommended)
 > 2. Keep them
 
@@ -147,6 +152,7 @@ entity-normalization artifact of older mines, not user data. Show
 
 > 36 of the 100 strongest hallways are spelling artifacts (2437 self-links
 > and 30805 duplicates overall). Options:
+>
 > 1. Run `mempalace hallways --prune-spellings` now, then `--yes` to apply
 >    (Recommended; edits only the hallways sidecar, drawers untouched)
 > 2. Leave them; the current miner no longer writes them, so they fade on
@@ -162,6 +168,7 @@ large palace; the CLI reads the sidecar directly.
 Show `one_off_sample` and the reuse ratio. Ask:
 
 > 51 of 57 facts use a predicate no other fact uses. Options:
+>
 > 1. Normalize them onto the fixed vocabulary (`works_on`, `owns`,
 >    `depends_on`, `uses`, `decided`, `status`, `located_in`, `measured`)
 >    with `mempalace kg normalize`, keeping history (Recommended)
@@ -186,6 +193,7 @@ holding many projects, and no room set can be meaningful for it. Ask:
 
 > `claude_conversations_windows` holds 27 projects in 124k drawers.
 > Options:
+>
 > 1. Split it into one wing per project with `mempalace wings split`
 >    (Recommended; existing project wings receive their drawers)
 > 2. Leave it mixed
@@ -202,6 +210,7 @@ Then ask per flat wing (`rooms.flat_wings`, largest first):
 
 > 98% of `claude_conversations` (12443 drawers) sits in `technical`.
 > Options:
+>
 > 1. Propose a closed room set for it with the local LLM, review the file,
 >    then apply (Recommended)
 > 2. Accept it for this wing; rely on search rather than the room layer

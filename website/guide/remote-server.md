@@ -26,7 +26,7 @@ MemPalace.
 
 ## Architecture
 
-```
+```text
   Teammate A ─┐
   Teammate B ─┤  MCP over HTTP        ┌─ mempalace-mcp --transport http
   Teammate C ─┴──(bearer token, TLS)─▶│   (one host: embedding + GPU)
@@ -120,7 +120,7 @@ and needs no extra.
 ## 3. Serve MCP over HTTP
 
 One command — `mempalace serve` — runs the server with secure defaults. A
-network bind, or a loopback bind a proxy publishes (see *Fronting proxies*
+network bind, or a loopback bind a proxy publishes (see _Fronting proxies_
 below), **requires a bearer token**: unless you pass one, the server reuses or
 auto-generates a strong token stored `0600` at
 `~/.mempalace/server/<key>/token`, where local `mempalace` clients (the CLI,
@@ -232,7 +232,7 @@ messages between machines.
   the per-session stdio servers that would otherwise pile up holding ChromaDB
   and HNSW file handles, which is not the case a dedicated always-on server is
   in. Set `MEMPALACE_MCP_IDLE_HOURS=0` to disable it, and make sure your
-  supervisor restarts on a *clean* exit (`Restart=always` rather than
+  supervisor restarts on a _clean_ exit (`Restart=always` rather than
   `Restart=on-failure`), because the watchdog exits `0`.
 - **Fronting proxies (Tailscale, nginx)**: the recommended personal-fleet
   setup is a loopback bind behind a tailnet-only proxy — nothing touches the

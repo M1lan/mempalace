@@ -18,7 +18,7 @@ grep -r mempalace-mcp pyproject.toml .mcp.json .claude-plugin .codex-plugin
 
 Expected on a healthy `develop`:
 
-```
+```text
 .mcp.json:      "command": "mempalace-mcp"
 pyproject.toml:mempalace-mcp = "mempalace.mcp_proxy:main"
 .claude-plugin/.mcp.json:    "command": "mempalace-mcp"
@@ -50,7 +50,7 @@ grep -r mempalace-light-mcp pyproject.toml .dsh-plugin/cordis.patch.yml
 
 Expected on a healthy `develop`:
 
-```
+```text
 pyproject.toml:mempalace-light-mcp = "mempalace.mcp_light_server:main"
 .dsh-plugin/cordis.patch.yml:        command: mempalace-light-mcp
 ```

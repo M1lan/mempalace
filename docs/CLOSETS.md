@@ -4,7 +4,7 @@
 
 Drawers hold your verbatim content. Closets are the index — compact pointers that tell the searcher which drawers to open.
 
-```
+```text
 CLOSET: "built auth system|Ben;Igor|→drawer_api_auth_a1b2c3"
          ↑ topic           ↑ entities  ↑ points to this drawer
 ```
@@ -16,6 +16,7 @@ Search never depends on closets: every query runs against the drawers directly, 
 ### When are closets created?
 
 Closets are created by the project miner (`mempalace mine` in projects mode) and by diary ingest. For each file:
+
 1. Content is chunked into drawers (verbatim, ~800 chars each)
 2. Topics, entities, and quotes are extracted from the first 5,000 characters of the content
 3. A closet is created with pointer lines to at most three drawers (for a project file, its first three; for a diary entry, the entry's first chunk)
@@ -25,7 +26,8 @@ Conversation mining (`mempalace mine --mode convos`) does not build closets. Tho
 ### What's inside a closet?
 
 Each line is one atomic topic pointer:
-```
+
+```text
 topic description|entity1;entity2|→drawer_id_1,drawer_id_2
 "verbatim quote from the content"|entity1|→drawer_id_3
 ```
@@ -50,7 +52,7 @@ Closets are stored in the `mempalace_closets` ChromaDB collection alongside `mem
 
 Closets are a ranking signal, never a gate. An earlier design searched closets first and fell back to drawers; it was replaced because weak closets (regex extraction over narrative text) hid drawers that direct search would have found.
 
-```
+```text
 Query → vector search over mempalace_drawers (the floor; see the fallback below)
          ↓
     closet search over mempalace_closets → best closet rank per source file
@@ -88,6 +90,7 @@ The pipeline above is the normal path. When the vector index is disabled (the ca
 ## For developers
 
 Closet functions live in `mempalace.palace` (`mempalace/palace/collection.py` and `mempalace/palace/closets.py`):
+
 - `get_closets_collection()` — get the closets ChromaDB collection
 - `build_closet_lines()` — extract topics/entities/quotes into pointer lines
 - `upsert_closet_lines()` — write lines to closets respecting the char limit (overwrites existing IDs; does not append — call `purge_file_closets` first when re-mining)
@@ -95,6 +98,7 @@ Closet functions live in `mempalace.palace` (`mempalace/palace/collection.py` an
 - `CLOSET_CHAR_LIMIT` / `CLOSET_EXTRACT_WINDOW` — size constants
 
 The closet boost lives in `mempalace.searcher` (`mempalace/searcher/`):
+
 - `_closet_boosts()` (`query.py`) — query closets, keep the best rank per source file
 - `_enrich_closet_hits()` (`candidates.py`) — re-render boosted hits from their source file's drawers
 - `_extract_drawer_ids_from_closet()` (`filters.py`) — parse `→drawer_a,drawer_b` pointers out of a closet document (search does not currently use it)

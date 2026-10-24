@@ -21,7 +21,7 @@ AAAK is a separate compression layer, **not the storage default**. The 96.6% ben
 
 ## Format
 
-```
+```text
 Header:   FILE_NUM|PRIMARY_ENTITY|DATE|TITLE
 Zettel:   ZID:ENTITIES|topic_keywords|"key_quote"|WEIGHT|EMOTIONS|FLAGS
 Tunnel:   T:ZID<->ZID|label
@@ -61,14 +61,16 @@ Three-letter uppercase codes: `ALC=Alice`, `KAI=Kai`, `MAX=Max`.
 ## Example
 
 **Input:**
-```
+
+```text
 We decided to use GraphQL instead of REST because the frontend team needs
 flexible queries. Kai recommended it after researching both options. The team
 was excited about the schema-first approach.
 ```
 
 **AAAK output:**
-```
+
+```text
 0:KAI|graphql_rest_decided|"decided to use GraphQL instead of REST"|determ+excite|DECISION+TECHNICAL
 ```
 
@@ -95,6 +97,7 @@ mempalace compress --wing myapp --config entities.json
 ```
 
 Entity config format:
+
 ```json
 {
   "entities": {"Alice": "ALC", "Bob": "BOB"},
@@ -122,6 +125,7 @@ dialect = Dialect.from_config("entities.json")
 ## When to Use AAAK
 
 AAAK is most useful when:
+
 - You have **many repeated entities** across thousands of sessions
 - You need to **compress context** for local models with small windows
 - You want **structured summaries** pointing back to verbatim drawers

@@ -91,7 +91,7 @@ cat ~/.mempalace/hook_state/cursor_hook.log
 
 Example log lines (ISO 8601 + event + conversation id):
 
-```
+```text
 [2026-05-27T02:16:01Z] [event=sessionStart] [conv=abc123] workspace=/Users/me/proj wing=proj
 [2026-05-27T02:21:33Z] [event=stop]         [conv=abc123] counter 0 -> 1 (interval=15)
 [2026-05-27T02:42:09Z] [event=stop]         [conv=abc123] counter 14 -> 15 (interval=15)
@@ -102,7 +102,7 @@ Example log lines (ISO 8601 + event + conversation id):
 When a hook can't parse its stdin (corrupt payload, future Cursor schema
 change), the raw input (capped at 4096 bytes, mode 0600) lands at:
 
-```
+```text
 ~/.mempalace/hook_state/cursor_last_input.log
 ~/.mempalace/hook_state/cursor_last_python_err.log
 ```

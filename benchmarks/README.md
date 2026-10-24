@@ -37,7 +37,8 @@ python benchmarks/longmemeval_bench.py /tmp/longmemeval-data/longmemeval_s_clean
 ```
 
 **Expected output (raw mode, full 500):**
-```
+
+```text
 Recall@5:  0.966
 Recall@10: 0.982
 NDCG@10:   0.889
@@ -74,7 +75,8 @@ python benchmarks/locomo_bench.py /tmp/locomo/data/locomo10.json --granularity s
 ```
 
 **Expected output (session, top-10, full 10 conversations):**
-```
+
+```text
 Avg Recall: 0.603
 Temporal:   0.692
 Time:       ~2 minutes
@@ -102,7 +104,8 @@ python benchmarks/convomem_bench.py --category user_evidence --limit 10
 **Categories available:** `user_evidence`, `assistant_facts_evidence`, `changing_evidence`, `abstention_evidence`, `preference_evidence`, `implicit_connection_evidence`
 
 **Expected output (all categories, 50 each):**
-```
+
+```text
 Avg Recall: 0.929
 Assistant Facts: 1.000
 User Facts:      0.980

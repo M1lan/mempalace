@@ -5,6 +5,7 @@
 Bug fixes and hardening merged to `develop`, releasing soon.
 
 **Merged:**
+
 - Security hardening: input validation, KG threading locks, WAL permission fixes (#647)
 - MCP tools: drawer CRUD, paginated export, hook settings (#667)
 - Backend storage seam: ChromaDB abstraction layer enabling swappable backends (#413)
@@ -15,6 +16,7 @@ Bug fixes and hardening merged to `develop`, releasing soon.
 - Mtime float precision fix preventing unnecessary re-mines (#610)
 
 **In review (merging this week):**
+
 - Auto-repair BLOB seq_ids from chromadb 0.6→1.5 migration (#664)
 - Graph cache with write-invalidation (#661)
 - L1 importance pre-filter for large palaces (#660)
@@ -62,7 +64,7 @@ These are under consideration for v4 stable or later:
 
 ## Branch Model
 
-```
+```text
 main            ← tagged production releases
 develop         ← active development (PRs merge here)
 release/3.1     ← hotfixes for current stable (v3.1.x)

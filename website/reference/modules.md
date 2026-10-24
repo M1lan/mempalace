@@ -4,7 +4,7 @@ Complete source file reference for the MemPalace codebase.
 
 ## Project Structure
 
-```
+```text
 mempalace/
 ├── README.md                  ← project documentation
 ├── mempalace/                 ← core package

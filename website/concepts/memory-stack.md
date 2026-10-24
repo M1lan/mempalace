@@ -31,6 +31,7 @@ Project: A journaling app that helps people process emotions.
 Auto-generated from the highest-importance drawers in the palace. Groups by room, picks the top moments, and keeps the output bounded.
 
 The generation process:
+
 1. Fetches a candidate window of the 2,000 most recently filed drawers
 2. Scores each by importance/emotional weight, breaking ties by filing time
 3. Takes the top 15 moments
@@ -43,7 +44,7 @@ push the ordering into storage (pgvector does; it advertises
 collection in storage order and sort the window locally, so on a palace larger
 than the window the newest drawers may not all be in the running.
 
-```
+```text
 ## L1 — ESSENTIAL STORY
 
 [auth-migration]

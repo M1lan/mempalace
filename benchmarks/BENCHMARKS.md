@@ -7,6 +7,7 @@
 ## The Core Finding
 
 Every competitive memory system uses an LLM to manage memory:
+
 - Mem0 uses an LLM to extract facts
 - Mastra uses GPT-5-mini to observe conversations
 - Supermemory uses an LLM to run agentic search passes
@@ -198,6 +199,7 @@ The 96.6% R@5 baseline broken down by the six question categories in LongMemEval
 | Single-session assistant | 92.9% | 96.4% | 56 | Weakest — questions about what the AI said |
 
 The two weakest categories point to specific fixes:
+
 - **Single-session assistant (92.9%)**: Questions ask about what the assistant said, not the user. Fixed by indexing assistant turns as well as user turns.
 - **Single-session preference (93.3%)**: Preferences are often stated indirectly ("I usually prefer X"). Fixed by the preference extraction patterns in hybrid v3.
 
@@ -225,7 +227,7 @@ This was the first result. Nobody expected it to work this well. The team's hypo
 
 **What changed:** Added keyword overlap scoring on top of embedding similarity.
 
-```
+```text
 fused_score = embedding_score × (1 + keyword_weight × overlap)
 ```
 
@@ -266,6 +268,7 @@ if temporal_distance < threshold:
 **What changed:** Added preference extraction — 16 regex patterns that detect how people actually express preferences in conversation, then create synthetic "User has mentioned: X" documents at index time.
 
 Examples of what gets caught:
+
 - "I usually prefer X" → `User has mentioned: preference for X`
 - "I always do Y" → `User has mentioned: always does Y`
 - "I don't like Z" → `User has mentioned: dislikes Z`
@@ -302,7 +305,8 @@ The target session said "I still remember the happy high school experiences such
 Built independently from the hybrid track. Different architecture, same ceiling.
 
 **Architecture:**
-```
+
+```text
 PALACE
   └── HALL (concept: travel, work, health, relationships, general)
         └── Two-pass retrieval:
@@ -321,6 +325,7 @@ The palace classifies each question into one of 5 halls. Pass 1 searches only wi
 **What it adds:** At ingest time, Claude Haiku reads each session and generates topic summaries and category labels. These become synthetic documents alongside the verbatim session.
 
 **Why it matters:** The hardest remaining misses are vocabulary-gap failures — the question uses different words than the session. Diary topics bridge these gaps:
+
 - Question: "yoga classes" → Session: "went this morning, instructor pushed me hard"
 - With diary: synthetic doc says "fitness, morning workout, yoga-style exercise" → now both match
 
@@ -514,6 +519,7 @@ In a peer-reviewed paper this would be a significant methodological problem. We'
 The 96.6% → 99.4% improvements (hybrid v1–v3) are honest improvements: each was motivated by a category of failures, not specific questions. The 99.4% → 100% hybrid v4 step is three targeted fixes for three known failures.
 
 The three questions represent 0.6% of the dataset. It is entirely possible that:
+
 1. The same fixes generalize and would score well on unseen data
 2. The fixes are overfit to those three questions and harm other questions
 
@@ -527,6 +533,7 @@ A proper split has been created: `benchmarks/lme_split_50_450.json` (seed=42).
 - **450 held-out questions** — final publishable score. Touch once. Any iteration after viewing held-out results contaminates them.
 
 Usage:
+
 ```bash
 # Create a split (one-time)
 python benchmarks/longmemeval_bench.py data/... --create-split --split-file benchmarks/lme_split_50_450.json
@@ -614,6 +621,7 @@ This is the honest publishable number. hybrid_v4's fixes (quoted phrase boost, p
 | NDCG@10 | 0.938 |
 
 Per-type (R@10):
+
 - knowledge-update: 100% (69/69)
 - multi-session: 100% (115/115)
 - single-session-assistant: 100% (54/54)
@@ -675,12 +683,14 @@ Beats Memori (81.95%) by 7pp with no reranking. Result file: `results_locomo_hyb
 Room taxonomy (14 rooms): identity_sexuality, career_education, relationships_romance, family_children, health_wellness, hobbies_creativity, social_community, home_living, travel_places, food_cooking, money_finance, emotions_mood, media_entertainment, general.
 
 Sample room assignments (conv-26, Caroline + Melanie):
+
 - 7/19 sessions → identity_sexuality (her dominant theme)
 - 6/19 sessions → family_children
 - 1/19 sessions → career_education ← where "What did Caroline research?" goes
 - 2/19 sessions → hobbies_creativity (Melanie's painting)
 
 Sample (conv-42, Joanna + Nate):
+
 - 21/29 sessions → hobbies_creativity (gaming tournaments, screenwriting, film festivals)
 
 Result files: `results_locomo_palace_session_top5_20260326_0031.json`, `results_locomo_palace_session_top10_20260326_0029.json`

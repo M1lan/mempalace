@@ -195,7 +195,7 @@ non-default backend is opt-in.
 
 | Backend | Mode | Install | Namespaces | Lexical | Configure with |
 | ------- | ---- | ------- | :--------: | :-----: | -------------- |
-| `chroma` _(default)_ | Local (embedded) | bundled | – | ✓ | – |
+| `chroma` *(default)* | Local (embedded) | bundled | – | ✓ | – |
 | `sqlite_exact` | Local (exact NumPy) | bundled | – | ✓ | – |
 | `rust_exact` | Local (native vectors) | wheel / compiled | – | ✓ | – |
 | `milvus` | Local (Lite) · Server opt-in | `mempalace[milvus]` | ✓ | ✓ | `MEMPALACE_MILVUS_URI` |

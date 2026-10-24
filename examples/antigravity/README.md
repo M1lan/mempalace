@@ -49,7 +49,7 @@ entry from this example into that file, then restart Antigravity.
 If you've created a custom plugin folder (per the [Antigravity plugins docs](https://antigravity.google/docs/plugins)),
 copy this `mcp_config.json` directly into the plugin root:
 
-```
+```text
 <plugin-root>/mcp_config.json
 ```
 

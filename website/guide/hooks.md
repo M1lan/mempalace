@@ -38,6 +38,7 @@ Add to `.claude/settings.local.json`:
 ```
 
 Make them executable:
+
 ```bash
 chmod +x hooks/mempal_save_hook.sh hooks/mempal_precompact_hook.sh
 ```
@@ -73,7 +74,7 @@ Edit `mempal_save_hook.sh` to change:
 
 ### Save Hook (Stop event)
 
-```
+```text
 User sends message → AI responds → Stop hook fires
                                           ↓
                                   Count human messages in transcript
@@ -91,7 +92,7 @@ The `stop_hook_active` flag prevents infinite loops.
 
 ### PreCompact Hook
 
-```
+```text
 Context window full → PreCompact fires → ALWAYS blocks → AI saves → Compaction proceeds
 ```
 
@@ -104,7 +105,8 @@ cat ~/.mempalace/hook_state/hook.log
 ```
 
 Example output:
-```
+
+```text
 [14:30:15] Session abc123: 12 exchanges, 12 since last save
 [14:35:22] Session abc123: 15 exchanges, 15 since last save
 [14:35:22] TRIGGERING SAVE at exchange 15

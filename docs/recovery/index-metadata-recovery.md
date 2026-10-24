@@ -9,7 +9,7 @@ can crash the Rust loader. This doc covers recovering from the quarantine.
 
 mempalace's HNSW integrity gate logs at daemon/MCP-server startup:
 
-```
+```text
 Quarantined invalid HNSW metadata in <palace>/<uuid>:
   labels present but dimensionality is missing or invalid (None)
 ```

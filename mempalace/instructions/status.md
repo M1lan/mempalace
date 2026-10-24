@@ -12,6 +12,7 @@ Check if MCP tools are available (look for mempalace_status in available tools).
 ## Step 2: Display Wing/Room/Drawer Counts
 
 Present the palace structure counts clearly:
+
 - Number of wings
 - Number of rooms
 - Number of drawers
@@ -22,6 +23,7 @@ Keep the output concise -- use a brief summary format, not verbose tables.
 ## Step 3: Knowledge Graph Stats (MCP only)
 
 If MCP tools are available, also call:
+
 - mempalace_kg_stats -- for a knowledge graph overview (triple count, entity
   count, relationship types)
 - mempalace_graph_stats -- for connectivity information (connected components,
