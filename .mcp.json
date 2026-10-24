@@ -1,5 +1,7 @@
 {
   "mcpServers": {
+  "graf": {"args":["--db","/home/m/src/mempalace/.graf/index.db","serve"],"command":"/home/m/.local/bin/graf"},
+
     "mempalace": {
       "command": "mempalace-mcp"
     }
