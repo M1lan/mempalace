@@ -11,13 +11,17 @@ uv tool install mempalace
 
 If you prefer pip, `pip install mempalace` still works.
 
+Android / Termux uses Android's Python wheel platform rather than Linux's.
+Follow the [Termux guide](/guide/termux) to run MemPalace in a Debian PRoot
+container instead of attempting a native install.
+
 ::: danger Security Warning
 The domain `mempalace.tech` is a **brand-squatting site** not affiliated with this project. It is known to run ad-redirects and potential malware. The official MemPalace distribution is only available via this [GitHub repository](https://github.com/MemPalace/mempalace) and [PyPI](https://pypi.org/project/mempalace/). Never install binaries or scripts from unofficial domains.
 :::
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.10+
 - `chromadb>=0.5.0` (installed automatically)
 - `pyyaml>=6.0` (installed automatically)
 

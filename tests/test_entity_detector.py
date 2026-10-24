@@ -3,12 +3,19 @@
 import contextlib
 import json
 import os
+import re
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from hypothesis import given, strategies as st
+
 from mempalace.entity_detector import (
+    _MAX_CANDIDATE_TOKEN_LEN,
     PROSE_EXTENSIONS,
     STOPWORDS,
+    _collapse_long_ascii_runs,
     _print_entity_list,
     classify_entity,
     confirm_entities,
@@ -17,7 +24,6 @@ from mempalace.entity_detector import (
     scan_for_detection,
     score_entity,
 )
-
 
 # ── extract_candidates ──────────────────────────────────────────────────
 
@@ -134,6 +140,7 @@ def test_coca_wordlist_file_loads_with_expected_shape():
     """The data file ships with a stable schema."""
     import json
     from pathlib import Path
+
     import mempalace
 
     pkg_dir = Path(mempalace.__file__).parent
@@ -156,6 +163,7 @@ def test_coca_wordlist_contains_all_known_aya_false_positives():
     false positive from Aya's real palace, lowercased."""
     import json
     from pathlib import Path
+
     import mempalace
 
     pkg_dir = Path(mempalace.__file__).parent
@@ -253,6 +261,7 @@ def test_known_systems_file_loads_with_expected_shape():
     """The data file ships with a stable schema."""
     import json
     from pathlib import Path
+
     import mempalace
 
     pkg_dir = Path(mempalace.__file__).parent
@@ -279,6 +288,7 @@ def test_known_systems_file_contains_expected_high_value_entries():
     users mention in real palaces."""
     import json
     from pathlib import Path
+
     import mempalace
 
     pkg_dir = Path(mempalace.__file__).parent
@@ -674,6 +684,16 @@ def test_scan_for_detection_fallback_to_all_readable(tmp_path):
     assert ".py" in extensions or ".js" in extensions
 
 
+def test_scan_for_detection_never_samples_mempalace_project_files(tmp_path):
+    """The rooms and entities a previous ``mempalace init`` wrote are not
+    source prose; sampling them made a second init detect different names."""
+    (tmp_path / "notes.md").write_text("Alice met Bob.")
+    for name in ("mempalace.yaml", "mempalace.yml", "mempal.yaml", "entities.json"):
+        (tmp_path / name).write_text("people: [Carol]")
+    names = {f.name for f in scan_for_detection(str(tmp_path))}
+    assert names == {"notes.md"}
+
+
 def test_scan_for_detection_max_files(tmp_path):
     """Caps to max_files."""
     for i in range(20):
@@ -697,8 +717,7 @@ def _temp_locale(locale_code: str, entity_section: dict):
     on the next run (the fixture lacks the required terms/cli/aaak sections).
     Recover with `rm mempalace/i18n/zz-test-*.json`.
     """
-    from mempalace import i18n
-    from mempalace import entity_detector
+    from mempalace import entity_detector, i18n
 
     locale_path = Path(i18n.__file__).parent / f"{locale_code}.json"
     if locale_path.exists():
@@ -1059,3 +1078,97 @@ def test_zh_tw_known_limitation_inline_name_no_boundary():
     result = extract_candidates(text, languages=("zh-TW",))
     # Extraction is expected to miss this adversarial case.
     assert "朱宜振" not in result
+
+
+# ── ReDoS guard: long ASCII blobs (#2063) ──────────────────────────────
+
+
+def test_collapse_long_ascii_runs_scope_and_threshold():
+    # A long unbroken ASCII run collapses to a single space...
+    assert _collapse_long_ascii_runs("A" * 24) == " "
+    assert _collapse_long_ascii_runs("z" * 100) == " "
+    # ...but a run just below the threshold is kept verbatim (boundary 23/24)
+    assert _collapse_long_ascii_runs("Q" * 23) == "Q" * 23
+    # whitespace-delimited natural text is untouched
+    assert _collapse_long_ascii_runs("Alice met Bob today") == "Alice met Bob today"
+    # spaces and newlines bound ASCII runs
+    assert _collapse_long_ascii_runs("ok\n" + "B" * 40 + " end") == "ok\n  end"
+    # non-ASCII scripts are NEVER collapsed, even as one long unbroken run — a
+    # CJK/Cyrillic paragraph has no ASCII whitespace (guards the zh regression).
+    assert _collapse_long_ascii_runs("朱" * 40) == "朱" * 40
+    assert _collapse_long_ascii_runs("Ы" * 40) == "Ы" * 40
+
+
+@given(st.text(max_size=200))
+def test_collapse_long_ascii_runs_leaves_no_collapsible_run(s):
+    """Property (any input): the output never contains a collapsible ASCII run,
+    so the class of inputs that can drive candidate matching into catastrophic
+    backtracking is eliminated — not just the reported sample (#2063)."""
+    out = _collapse_long_ascii_runs(s)
+    assert re.search(rf"[!-~]{{{_MAX_CANDIDATE_TOKEN_LEN},}}", out) is None
+
+
+def test_extract_candidates_drops_overlong_ascii_blob_and_keeps_names():
+    """A long unbroken ASCII run (base64/minified/hash) is out-of-domain: it must
+    not surface as an entity candidate, nor trigger the catastrophic backtracking
+    that pinned mines for hours (#2063). Normal names around it are still
+    detected."""
+    longtok = "Aa" + "Bb" * 30  # 62-char unbroken ASCII run
+    text = (longtok + " ") * 3 + "Lantern ships Lantern plus Lantern here."
+    result = extract_candidates(text)
+    assert longtok not in result
+    assert "Lantern" in result
+
+
+def test_extract_candidates_preserves_cjk_without_ascii_whitespace():
+    """CJK text has no ASCII whitespace, so a whole Chinese paragraph is one
+    unbroken run. The mitigation collapses only long ASCII runs, so CJK entity
+    detection keeps working (#2063 regression guard for zh-CN/zh-TW, whose
+    candidate path has no multi-word fallback)."""
+    # 朱宜振 appears 3x, each flanked by full-width (non-ASCII) punctuation.
+    text = "朱宜振：這個方案沒問題。朱宜振，你負責前端。朱宜振，好，我來處理。今天大家都同意。"
+    result = extract_candidates(text, languages=("zh-TW",))
+    assert "朱宜振" in result
+
+
+def test_entity_extraction_no_redos_on_adversarial_ascii_run():
+    """The real catastrophic trigger — a Cap+lower prefix, a long pure-uppercase
+    ASCII run, then a word char blocking the trailing word boundary — must
+    complete fast, not hang (#2063). Run in a subprocess with a hard timeout so
+    a regression fails fast instead of pinning CI (no pytest-timeout available)."""
+    code = (
+        "from mempalace.entity_detector import extract_candidates\n"
+        "from mempalace.palace import _candidate_entity_words\n"
+        "payload = 'Aa' + 'B' * 400 + '0'\n"
+        "extract_candidates(payload)\n"
+        "_candidate_entity_words(payload)\n"
+        "print('OK')\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise AssertionError(
+            "entity extraction hung on an adversarial ASCII run — ReDoS regression (#2063)"
+        ) from None
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_al_and_ps1_are_sampled_when_prose_is_scarce(tmp_path):
+    """An AL-only Business Central repo still yields files to sample (#278).
+    The miner's own list gains the same two extensions in #2702."""
+    from mempalace import entity_detector
+
+    assert {".al", ".ps1"} <= entity_detector.READABLE_EXTENSIONS
+    (tmp_path / "Customer.Codeunit.al").write_text('codeunit 50100 "Greeting" { }\n')
+    (tmp_path / "Build.AL").write_text("table 50100 Thing { }\n")
+    (tmp_path / "build.ps1").write_text('Write-Host "build"\n')
+
+    found = sorted(p.name for p in entity_detector.scan_for_detection(str(tmp_path)))
+
+    assert found == ["Build.AL", "Customer.Codeunit.al", "build.ps1"]

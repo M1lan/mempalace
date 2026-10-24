@@ -54,9 +54,10 @@ and violates MemPalace's "memory should feel instant" budget.
    of a conversation. If memory was injected, start from it before
    searching further.
 2. **Before responding** about people, projects, past events, or prior
-   decisions: call `mempalace_search` first. For relational or temporal
-   facts ("who reported to whom in March", "what was true then"), call
-   `mempalace_kg_query` instead or as well.
+   decisions: use `mempalace_kg_query` for known relationships or time-bound
+   facts, `mempalace_search` for source text, or `mempalace_diary_read` for
+   recent agent continuity. Stop when answered; follow the canonical
+   [query guide](https://github.com/MemPalace/mempalace/blob/develop/integrations/shared/recall-protocol.md#retrieve-only-the-context-you-need).
 3. **If unsure** about a fact (name, age, relationship, preference): say
    "let me check the palace" and query. Wrong is worse than slow.
 4. **Return verbatim.** Quote the drawer's exact stored words. Never
@@ -65,8 +66,11 @@ and violates MemPalace's "memory should feel instant" budget.
 5. **After a substantive session**, record continuity with
    `mempalace_diary_write` (background hooks may already do this — do not
    double-file).
-6. **When a fact changes**, call `mempalace_kg_invalidate` on the old
-   fact, then `mempalace_kg_add` for the new one.
+6. **When a fact changes**, choose the operation that preserves temporal
+   history: use `mempalace_kg_supersede` for single-valued replacements
+   (model, employer, owner, address, current status),
+   `mempalace_kg_invalidate` for facts that ended without replacement,
+   and `mempalace_kg_add` for independent/coexisting facts.
 
 The full canonical protocol — shared verbatim with the Antigravity
 recall rule and the other integrations — lives in
@@ -76,8 +80,9 @@ recall rule and the other integrations — lives in
 
 | You need | Tool |
 |---|---|
-| Find any memory by meaning | `mempalace_search` (start here) |
+| Find any memory by meaning | `mempalace_search` |
 | Relational / time-bound facts about an entity | `mempalace_kg_query` |
+| Replace a single-valued fact | `mempalace_kg_supersede` |
 | The chronological story of an entity | `mempalace_kg_timeline` |
 | Recent session continuity | `mempalace_diary_read` |
 | Which wings / rooms exist (scope unknown) | `mempalace_list_wings`, `mempalace_list_rooms` |
@@ -89,16 +94,18 @@ question — not a system prompt or pasted conversation) plus optional
 
 ## Unhappy paths
 
-- **Empty results.** Say the palace has nothing on this; do not invent an
-  answer to fill the gap. Offer to widen the search (drop the wing
-  filter) or to file the new information.
+- **Empty results.** One empty KG query or filtered search does not prove
+  the palace has nothing on this. Follow the query guide to check or widen
+  the scope. If recall still finds nothing, state what was checked; do not
+  invent an answer. Offer to file the new information.
 - **MCP unavailable / tool error.** Surface the error plainly and suggest
   the user verify the server (`mempalace status`, or re-run the
   installer `hooks/antigravity/install.sh`). Do not silently fall back
   to guessing from model memory.
 - **Stale or conflicting facts.** Prefer the knowledge graph's
-  time-valid answer; if a fact has changed, invalidate the old one and
-  add the new one rather than overwriting context silently.
+  time-valid answer. Use `mempalace_kg_supersede` for single-valued replacements,
+  `mempalace_kg_invalidate` for facts that ended without replacement,
+  and `mempalace_kg_add` for independent/coexisting facts.
 
 ## Anti-patterns — never do these
 

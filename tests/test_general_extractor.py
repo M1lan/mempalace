@@ -13,7 +13,6 @@ from mempalace.general_extractor import (
     extract_memories,
 )
 
-
 # ── extract_memories — empty / no markers ───────────────────────────────
 
 
@@ -23,14 +22,42 @@ def test_extract_memories_empty_text():
 
 
 def test_extract_memories_no_markers():
-    result = extract_memories("The quick brown fox jumped over the lazy dog.")
-    assert result == []
+    text = "The quick brown fox jumped over the lazy dog."
+    result = extract_memories(text)
+    assert result == [
+        {"content": text, "memory_type": "general", "chunk_index": 0},
+    ]
 
 
-def test_extract_memories_short_text_skipped():
-    # Paragraphs shorter than 20 chars are skipped
+def test_extract_memories_short_text_kept():
     result = extract_memories("ok sure")
-    assert result == []
+    assert result == [
+        {"content": "ok sure", "memory_type": "general", "chunk_index": 0},
+    ]
+
+
+def test_unmatched_paragraphs_stay_verbatim_beside_a_classified_one():
+    recipe = "Mix two cups of flour with warm water until the dough holds together."
+    meeting = "Standup is at nine in the east conference room on Thursday."
+    decision = "We decided to ship Friday because the tests passed cleanly."
+    memories = extract_memories(f"{recipe}\n\n{meeting}\n\n{decision}")
+    by_text = {item["content"]: item["memory_type"] for item in memories}
+    assert by_text[recipe] == "general"
+    assert by_text[meeting] == "general"
+    assert by_text[decision] == "decision"
+
+
+def test_oversized_text_slices_on_whitespace_without_changing_words():
+    paragraph = " ".join(["quinoa"] * 40)
+    memories = extract_memories(paragraph, chunk_size=25)
+    assert memories
+    assert all(item["memory_type"] == "general" for item in memories)
+    assert "".join(item["content"] for item in memories) == paragraph
+    assert all(len(item["content"]) <= 25 for item in memories)
+    for item in memories:
+        tokens = [token for token in item["content"].split(" ") if token]
+        assert tokens
+        assert set(tokens) == {"quinoa"}
 
 
 # ── extract_memories — decision markers ─────────────────────────────────
@@ -310,3 +337,29 @@ def test_extract_memories_chunk_index_contiguous_across_segments():
     assert indices == list(range(len(memories))), (
         f"chunk_index must be 0..N-1 sequential; got {indices}"
     )
+
+
+def test_markdown_emphasis_does_not_score_as_emotional():
+    """Markdown formatting syntax must not count as emotional content."""
+    text = (
+        "**Key reasons:** transactional guarantees and mature tooling. "
+        "The rollout plan is documented under **Migration notes**."
+    )
+
+    score, _ = _score_markers(text, ALL_MARKERS["emotional"])
+
+    assert score == 0.0
+
+
+def test_markdown_bold_does_not_override_decision_classification():
+    """Markdown-heavy technical prose must not outrank a real decision marker."""
+    text = (
+        "We decided to use PostgreSQL for the new service. "
+        "**Key reasons:** transactional guarantees and mature tooling. "
+        "The rollout details are documented under **Migration notes**."
+    )
+
+    memories = extract_memories(text)
+
+    assert len(memories) == 1
+    assert memories[0]["memory_type"] == "decision"

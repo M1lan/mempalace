@@ -53,26 +53,31 @@ and violates MemPalace's "memory should feel instant" budget.
 1. On wake-up, if a session-start hook injected `additional_context`,
    honour its wing scoping.
 2. Before responding about people / projects / past events / prior
-   decisions: call `mempalace_search` first. Use `mempalace_kg_query`
-   for relational or time-bound facts.
+   decisions: use `mempalace_kg_query` for known relationships or time-bound
+   facts, `mempalace_search` for source text, or `mempalace_diary_read` for
+   recent agent continuity. Stop when answered; follow the canonical
+   [query guide](https://github.com/MemPalace/mempalace/blob/develop/integrations/shared/recall-protocol.md#retrieve-only-the-context-you-need).
 3. If unsure about a fact: say "let me check the palace" and query.
 4. Return the drawer's **verbatim** text. Never summarize or paraphrase
    stored content — quoting the exact words is the point of the system.
 5. After a substantive session, record continuity with
    `mempalace_diary_write` (skip if a background hook already saved).
-6. When a fact changes: `mempalace_kg_invalidate` the old fact, then
-   `mempalace_kg_add` the new one.
+6. When a fact changes: use `mempalace_kg_supersede` for
+   single-valued replacements, `mempalace_kg_invalidate` for facts that
+   ended without replacement, and `mempalace_kg_add` for
+   independent/coexisting facts.
 
 The full canonical protocol — shared verbatim with the Cursor recall
-rule and the other integrations — lives in
-[`integrations/shared/recall-protocol.md`](../../integrations/shared/recall-protocol.md).
+rule and the other integrations — is published in the
+[MemPalace repository](https://github.com/MemPalace/mempalace/blob/main/integrations/shared/recall-protocol.md).
 
 ## Tool selection
 
 | You need | Tool |
 |---|---|
-| Find any memory by meaning | `mempalace_search` (start here) |
+| Find any memory by meaning | `mempalace_search` |
 | Relational / time-bound facts about an entity | `mempalace_kg_query` |
+| Replace a single-valued fact | `mempalace_kg_supersede` |
 | The chronological story of an entity | `mempalace_kg_timeline` |
 | Recent session continuity | `mempalace_diary_read` |
 | Which wings / rooms exist (scope unknown) | `mempalace_list_wings`, `mempalace_list_rooms` |
@@ -82,11 +87,19 @@ rule and the other integrations — lives in
 question — not a system prompt or pasted conversation) plus optional
 `wing` / `room` filters and `limit` (default 5).
 
+**Active coordination is not recall.** When delegating work to another
+agent on the shared hub — or waiting for its reply or patch — use the
+logstream tools (`mempalace_event_append`, `mempalace_event_wait`,
+`mempalace_patch_submit`, `mempalace_artifact_get`), not drawers or
+search. The canonical protocol is published in the
+[MemPalace repository](https://github.com/MemPalace/mempalace/blob/main/integrations/shared/coordination-protocol.md).
+
 ## Unhappy paths
 
-- **Empty results.** Say the palace has nothing on this; do not invent an
-  answer. Offer to widen the search (drop the `wing` filter) or to file
-  the new information.
+- **Empty results.** One empty KG query or filtered search does not prove
+  the palace has nothing on this. Follow the query guide to check or widen
+  the scope. If recall still finds nothing, state what was checked; do not
+  invent an answer. Offer to file the new information.
 - **MCP error / server down.** Surface the error and suggest the user
   run `mempalace status` or re-run `/mempalace-init`. Never fall back to
   guessing.
@@ -105,7 +118,9 @@ question — not a system prompt or pasted conversation) plus optional
   Do not attempt an in-process repair from the agent. Full steps are in
   the shared protocol's "Recovering a corrupt index" section.
 - **Conflicting facts.** Trust the knowledge graph's time-valid answer;
-  invalidate-then-add rather than overwriting silently.
+  use `mempalace_kg_supersede` for single-valued replacements,
+  `mempalace_kg_invalidate` for facts that ended without replacement,
+  and `mempalace_kg_add` for independent/coexisting facts.
 
 ## Anti-patterns — never do these
 

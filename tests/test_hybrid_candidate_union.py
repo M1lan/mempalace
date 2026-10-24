@@ -141,11 +141,11 @@ class TestCandidateUnion:
             f"union must trim to n_results=2; got {len(result['results'])} results"
         )
 
-    def test_union_skipped_when_max_distance_set(self, tmp_path):
-        """``max_distance`` is a vector-distance threshold; BM25-only
-        candidates have ``distance=None`` and cannot satisfy it. Union
-        must not silently inject them when a strict threshold is set,
-        otherwise the existing ``max_distance`` guarantee regresses."""
+    def test_union_respects_max_distance_set(self, tmp_path):
+        """``max_distance`` remains a vector-distance threshold in union mode:
+        a lexical candidate with a computable distance joins only when that
+        distance satisfies it. One whose distance can't be computed is kept
+        and says so."""
         palace = str(tmp_path / "palace")
         _seed_drawers(palace)
         # Sanity: without max_distance, union surfaces the BM25-strong doc.
@@ -154,8 +154,8 @@ class TestCandidateUnion:
         )
         assert "brand_voice_D4.md" in {h["source_file"] for h in unfiltered["results"]}
 
-        # With a tight max_distance, union must NOT inject BM25-only hits —
-        # every returned hit must have a real (non-None) distance.
+        # With a tight max_distance, every returned hit either has a real
+        # distance that satisfies the threshold or is flagged as unscored.
         filtered = search_memories(
             _NARRATIVE_QUERY,
             palace,
@@ -164,10 +164,9 @@ class TestCandidateUnion:
             max_distance=0.5,
         )
         for h in filtered["results"]:
-            assert h.get("distance") is not None, (
-                f"union under max_distance must not inject BM25-only "
-                f"(distance=None) candidates; offending hit: {h}"
-            )
+            if h.get("distance") is None:
+                assert h.get("fallback_reason") == "distance_unavailable", h
+                continue
             assert h["distance"] <= 0.5, f"hit violates max_distance=0.5: distance={h['distance']}"
 
     def test_union_dedup_is_chunk_precise_not_basename(self, tmp_path):

@@ -1,6 +1,9 @@
 """Tests for palace_path tilde expansion in MempalaceConfig."""
 
+import json
 import os
+import tempfile
+
 from mempalace.config import MempalaceConfig
 
 
@@ -31,3 +34,50 @@ def test_palace_path_absolute_unchanged():
     cfg = MempalaceConfig()
     cfg._file_config["palace_path"] = "/tmp/test_palace"
     assert cfg.palace_path == "/tmp/test_palace"
+
+
+def test_init_persists_constructor_override_not_default():
+    """init() must persist the resolved palace_path, not the hardcoded default.
+
+    `mempalace --palace <custom> init` passes palace_path via the constructor
+    (mirrored from cli.py's env-var write for cmd_init). The persisted
+    config.json must record that custom path so a later invocation with no
+    --palace flag (e.g. `mempalace status`) still finds it.
+    """
+    config_dir = tempfile.mkdtemp()
+    custom_palace = os.path.join(tempfile.mkdtemp(), "custom-palace")
+    cfg = MempalaceConfig(config_dir=config_dir, palace_path=custom_palace)
+    assert cfg.palace_path == custom_palace
+
+    cfg.init()
+
+    with open(os.path.join(config_dir, "config.json")) as f:
+        saved = json.load(f)
+    assert saved["palace_path"] == custom_palace
+
+    # A later invocation with no override must read the persisted path back.
+    later_cfg = MempalaceConfig(config_dir=config_dir)
+    assert later_cfg.palace_path == custom_palace
+
+
+def test_init_does_not_freeze_an_env_var_palace_path():
+    """A MEMPALACE_PALACE_PATH set in the environment is not written to
+    config.json: the env keeps winning while it is set, and once it is unset
+    the palace goes back to the default instead of a stale frozen copy.
+    (`mempalace init --palace` records its path explicitly; see test_cli.)
+    """
+    config_dir = tempfile.mkdtemp()
+    custom_palace = os.path.join(tempfile.mkdtemp(), "env-palace")
+    os.environ["MEMPALACE_PALACE_PATH"] = custom_palace
+    try:
+        cfg = MempalaceConfig(config_dir=config_dir)
+        cfg.init()
+        assert cfg.palace_path == custom_palace
+    finally:
+        del os.environ["MEMPALACE_PALACE_PATH"]
+
+    with open(os.path.join(config_dir, "config.json")) as f:
+        saved = json.load(f)
+    assert "palace_path" not in saved
+    later_cfg = MempalaceConfig(config_dir=config_dir)
+    assert later_cfg.palace_path == os.path.join(config_dir, "palace")

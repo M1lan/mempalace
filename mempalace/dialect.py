@@ -44,9 +44,8 @@ FLAGS:
 import json
 import os
 import re
-from typing import List, Dict, Optional
 from pathlib import Path
-
+from typing import Dict, List, Optional
 
 # === EMOTION CODES (universal) ===
 
@@ -339,7 +338,7 @@ class Dialect:
         self.skip_names = [n.lower() for n in (skip_names or [])]
 
         # Load language-specific AAAK instruction and regex patterns
-        from mempalace.i18n import load_lang, t, current_lang, get_regex
+        from mempalace.i18n import current_lang, get_regex, load_lang, t
 
         if lang:
             load_lang(lang)
@@ -357,8 +356,11 @@ class Dialect:
             "skip_names": ["Gandalf", "Sherlock"]
         }
         """
-        with open(config_path, "r") as f:
-            config = json.load(f)
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{config_path} is not valid UTF-8 — re-save it as UTF-8") from exc
         return cls(
             entities=config.get("entities", {}),
             skip_names=config.get("skip_names", []),
@@ -381,7 +383,7 @@ class Dialect:
             "entities": canonical,
             "skip_names": self.skip_names,
         }
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
 
     # === ENCODING (entity/emotion primitives) ===
@@ -776,11 +778,11 @@ class Dialect:
 
     def compress_file(self, zettel_json_path: str, output_path: str = None) -> str:
         """Read a zettel JSON file and compress it to AAAK Dialect."""
-        with open(zettel_json_path, "r") as f:
+        with open(zettel_json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         dialect = self.encode_file(data)
         if output_path:
-            with open(output_path, "w") as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(dialect)
         return dialect
 
@@ -790,14 +792,14 @@ class Dialect:
         for fname in sorted(os.listdir(zettel_dir)):
             if fname.endswith(".json"):
                 fpath = os.path.join(zettel_dir, fname)
-                with open(fpath, "r") as f:
+                with open(fpath, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 dialect = self.encode_file(data)
                 all_dialect.append(dialect)
                 all_dialect.append("---")
         combined = "\n".join(all_dialect)
         if output_path:
-            with open(output_path, "w") as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(combined)
         return combined
 
@@ -824,7 +826,7 @@ class Dialect:
             if not fname.endswith(".json"):
                 continue
             fpath = os.path.join(zettel_dir, fname)
-            with open(fpath, "r") as f:
+            with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             file_num = fname.replace("file_", "").replace(".json", "")
@@ -846,7 +848,7 @@ class Dialect:
             if not fname.endswith(".json"):
                 continue
             fpath = os.path.join(zettel_dir, fname)
-            with open(fpath, "r") as f:
+            with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for t in data.get("tunnels", []):
                 all_tunnels.append(t)
@@ -918,7 +920,7 @@ class Dialect:
         result = "\n".join(lines)
 
         if output_path:
-            with open(output_path, "w") as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(result)
 
         return result
@@ -1029,7 +1031,7 @@ if __name__ == "__main__":
             "skip_names": [],
         }
         out_path = "entities.json"
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(example, f, indent=2)
         print(f"Created example config: {out_path}")
         print("Edit this file with your own entity mappings, then use --config entities.json")
@@ -1052,7 +1054,7 @@ if __name__ == "__main__":
         print(result)
 
     elif args[0] == "--stats":
-        with open(args[1], "r") as f:
+        with open(args[1], "r", encoding="utf-8") as f:
             data = json.load(f)
         json_str = json.dumps(data, indent=2)
         encoded = dialect.encode_file(data)
@@ -1060,7 +1062,7 @@ if __name__ == "__main__":
         print("=== COMPRESSION STATS ===")
         print(f"JSON:     ~{stats['original_tokens_est']:,} tokens (est)")
         print(f"AAAK:     ~{stats['summary_tokens_est']:,} tokens (est)")
-        print(f"Ratio:    {stats['size_ratio']}x (lossy — information is lost)")
+        print(f"Ratio:    {stats['size_ratio']}x (lossy -- information is lost)")
         print()
         print("=== AAAK DIALECT OUTPUT ===")
         print(encoded)

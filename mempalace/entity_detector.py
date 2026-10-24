@@ -32,17 +32,19 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import re
-import os
 import functools
-from pathlib import Path
+import json
+import os
+import re
 from collections import defaultdict
+from pathlib import Path
 
 from mempalace.i18n import get_entity_patterns
+from mempalace.project_config import MEMPALACE_PROJECT_FILES
 
+from . import paths
 
-# ==================== COCA CONTENT-WORD FILTER (Tier 2 linguistics cleanup) ====================
+# ==================== COCA CONTENT-WORD FILTER ====================
 #
 # Common English content words that frequently appear capitalized (sentence
 # start, headings, markdown emphasis) but are NOT proper nouns. Filtering
@@ -53,10 +55,8 @@ from mempalace.i18n import get_entity_patterns
 # once on first call via ``_get_coca_filter``. Matching is case-insensitive:
 # callers must lowercase the candidate before lookup.
 #
-# Tier 3 (planned) will add a known-systems lexicon that protects compound
-# names like "Claude Code" — for now, the multi-word path in
-# ``extract_candidates`` is intentionally NOT filtered, so legitimate
-# compounds remain detectable.
+# The multi-word path in ``extract_candidates`` is intentionally NOT
+# filtered, so legitimate compounds like "Claude Code" remain detectable.
 
 
 @functools.lru_cache(maxsize=1)
@@ -78,13 +78,13 @@ def _get_coca_filter() -> frozenset[str]:
         return frozenset()
 
 
-# ==================== KNOWN-SYSTEMS COMPOUND LEXICON (Tier 3 linguistics cleanup) ====================
+# ==================== KNOWN-SYSTEMS COMPOUND LEXICON ====================
 #
 # Multi-word product / system names that must be detected atomically — NOT
 # decomposed into their constituent words. When "Claude Code" appears in
 # content, the entity detector counts the compound, not the parts. Without
 # this pre-pass, the single-word loop would split "Claude Code" into
-# "Claude" + "Code", and the COCA filter (Tier 2) would drop "Code" as a
+# "Claude" + "Code", and the COCA filter would drop "Code" as a
 # content word — leaving "Claude" alone with the wrong attribution.
 #
 # Data file: ``mempalace/data/known_systems.json``. Loaded once on first
@@ -235,6 +235,10 @@ READABLE_EXTENSIONS = {
     ".rb",
     ".go",
     ".rs",
+    # Mirrors miner.READABLE_EXTENSIONS: Business Central AL and
+    # PowerShell, so an AL-only repo still has files to sample.
+    ".al",
+    ".ps1",
 }
 
 SKIP_DIRS = {
@@ -248,7 +252,7 @@ SKIP_DIRS = {
     "build",
     ".next",
     "coverage",
-    ".mempalace",
+    paths.DIRNAME,
     ".terraform",
     "vendor",
     "target",
@@ -272,6 +276,34 @@ SKIP_FILENAMES = {
 # ==================== CANDIDATE EXTRACTION ====================
 
 
+# Entity-candidate matching is ReDoS-prone: the English candidate pattern's
+# nested alternation (i18n/en.json) backtracks catastrophically on a long
+# unbroken run of printable ASCII (base64, minified JS, hashes, data URIs),
+# pinning a mine on one ~5000-char window for hours. Such a run is never
+# a name, so it is collapsed to a space before single-word matching. Scope:
+#   * ASCII-only ([!-~]): non-ASCII scripts (CJK, Cyrillic, Devanagari,
+#     accented Latin) are deliberately left untouched — a CJK paragraph is one
+#     unbroken run with no ASCII whitespace, and those locales' candidate
+#     patterns are bounded and never backtrack, so collapsing them would
+#     silently destroy their entity detection.
+#   * The threshold sits above the 20-char cap of the simple-name pattern
+#     ([A-Z][a-z]{1,19}), so no real single-word name is dropped. A CamelCase
+#     code identifier glued inside a long ASCII run (a path/URL/dotted name) is
+#     dropped as noise; whitespace-delimited proper nouns are unaffected.
+_MAX_CANDIDATE_TOKEN_LEN = 24
+_LONG_ASCII_RUN_RX = re.compile(rf"[!-~]{{{_MAX_CANDIDATE_TOKEN_LEN},}}")
+
+
+def _collapse_long_ascii_runs(text: str) -> str:
+    """Collapse a long unbroken run of printable ASCII to a single space.
+
+    Applied only before single-word candidate matching — the whitespace-delimited
+    multi-word patterns cannot backtrack on such runs. See ``_LONG_ASCII_RUN_RX``
+    for scope and rationale.
+    """
+    return _LONG_ASCII_RUN_RX.sub(" ", text)
+
+
 def extract_candidates(text: str, languages=("en",)) -> dict:
     """
     Extract all capitalized proper noun candidates from text.
@@ -288,7 +320,7 @@ def extract_candidates(text: str, languages=("en",)) -> dict:
 
     counts: defaultdict = defaultdict(int)
 
-    # Tier 3 — known-systems compound pre-pass. Find compound product names
+    # Known-systems compound pre-pass. Find compound product names
     # ("Claude Code", "GitHub Copilot", ...) FIRST and mask them out of the
     # working text so the subsequent single-word + multi-word loops don't
     # re-decompose them into their constituent tokens.
@@ -296,17 +328,19 @@ def extract_candidates(text: str, languages=("en",)) -> dict:
     for compound, n in compound_counts.items():
         counts[compound] += n
 
-    # Single-word candidates — one pre-wrapped pattern per language
+    # Single-word candidates — one pre-wrapped pattern per language.
+    # Collapse long ASCII blobs first (base64/minified) to defuse ReDoS.
+    candidate_text = _collapse_long_ascii_runs(working_text)
     for wrapped_pat in patterns["candidate_patterns"]:
         try:
             rx = re.compile(wrapped_pat)
         except re.error:
             continue
-        for word in rx.findall(working_text):
+        for word in rx.findall(candidate_text):
             wl = word.lower()
             if wl in stopwords:
                 continue
-            # Tier 2 linguistics cleanup: block common English content words
+            # Block common English content words
             # (Code, Brutal, Phase, Line, Note, ...) from entity candidacy.
             # Multi-word path below is intentionally not filtered so
             # compound names like "Claude Code" still get detected.
@@ -598,6 +632,13 @@ def detect_entities(
         if files_read >= max_files:
             break
         try:
+            # Decide by file type before opening: ``scan_for_detection``
+            # picks candidates by extension, so a FIFO named ``notes.md``
+            # reaches this loop and a blocking open of one waits in the
+            # kernel for a writer that may never come. ``is_file()`` stats
+            # instead of opening and never blocks.
+            if not Path(filepath).is_file():
+                continue
             with open(filepath, encoding="utf-8", errors="replace") as f:
                 content = f.read(MAX_BYTES_PER_FILE)
             all_text.append(content)
@@ -718,7 +759,7 @@ def _print_entity_list(entities: list, label: str):
         print("    (none detected)")
         return
     for i, e in enumerate(entities):
-        confidence_bar = "●" * int(e["confidence"] * 5) + "○" * (5 - int(e["confidence"] * 5))
+        confidence_bar = "#" * int(e["confidence"] * 5) + "." * (5 - int(e["confidence"] * 5))
         signals_str = ", ".join(e["signals"][:2]) if e["signals"] else ""
         print(f"    {i + 1:2}. {e['name']:20} [{confidence_bar}] {signals_str}")
 
@@ -738,7 +779,7 @@ def confirm_entities(detected: dict, yes: bool = False) -> dict:
     Pass yes=True to auto-accept all detected entities without prompting.
     """
     print(f"\n{'=' * 58}")
-    print("  MemPalace — Entity Detection")
+    print("  MemPalace -- Entity Detection")
     print(f"{'=' * 58}")
     print("\n  Scanned your files. Here's what we found:\n")
 
@@ -768,7 +809,7 @@ def confirm_entities(detected: dict, yes: bool = False) -> dict:
             "topics": confirmed_topics,
         }
 
-    print(f"\n{'─' * 58}")
+    print(f"\n{'-' * 58}")
     print("  Options:")
     print("    [enter]  Accept all")
     print("    [edit]   Remove wrong entries or reclassify uncertain")
@@ -783,9 +824,9 @@ def confirm_entities(detected: dict, yes: bool = False) -> dict:
     if choice == "edit":
         # Handle uncertain first
         if detected["uncertain"]:
-            print("\n  Uncertain entities — classify each:")
+            print("\n  Uncertain entities -- classify each:")
             for e in detected["uncertain"]:
-                ans = input(f"    {e['name']} — (p)erson, (r)project, or (s)kip? ").strip().lower()
+                ans = input(f"    {e['name']} -- (p)erson, (r)project, or (s)kip? ").strip().lower()
                 if ans == "p":
                     confirmed_people.append(e["name"])
                 elif ans == "r":
@@ -842,7 +883,9 @@ def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
     """
     Collect prose file paths for entity detection.
     Prose only (.txt, .md, .rst, .csv) — code files produce too many false positives.
-    Falls back to all readable files if no prose found.
+    Falls back to all readable files if no prose found. MemPalace's own
+    project files are never sampled, so a re-run of ``mempalace init`` does
+    not read back the rooms and entities the first run wrote.
     """
     project_path = Path(project_dir).expanduser().resolve()
     prose_files = []
@@ -852,7 +895,7 @@ def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for filename in filenames:
             filepath = Path(root) / filename
-            if filepath.stem.lower() in SKIP_FILENAMES:
+            if filepath.stem.lower() in SKIP_FILENAMES or filename in MEMPALACE_PROJECT_FILES:
                 continue
             ext = filepath.suffix.lower()
             if ext in PROSE_EXTENSIONS:

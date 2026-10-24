@@ -7,24 +7,36 @@ Routes each file to the right room based on content.
 Stores verbatim chunks as drawers. No summaries. Ever.
 """
 
+import fnmatch
+import hashlib
+import logging
 import os
 import re
-import sys
 import shlex
-import hashlib
-import fnmatch
-import logging
 import stat
-from pathlib import Path
-from datetime import datetime
+import sys
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
+from . import paths
+from ._env import env_str, parse_number
 from .entity_detector import _apply_known_systems_prepass, _get_coca_filter
+from .fsio import atomic_write_json, encoding_metadata, move_aside, read_source_text
+
+# Module-level import so tests can patch it as
+# ``mempalace.miner.compute_hallways_for_wing``. The integration call
+# lives at the end of _mine_impl, alongside the existing
+# ``_compute_topic_tunnels_for_wing`` post-mine block.
+from .hallways import compute_hallways_for_wing
+from .ids import ID_RECIPE, make_drawer_id_from_chunk
+from .metadata_types import is_bookkeeping
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
     MineValidationError,
+    StaleDrawerPurgeFailed,
     _candidate_entity_words,
     _open_collection_or_explain,
     _validate_palace_fts5_after_mine,
@@ -34,19 +46,27 @@ from .palace import (
     get_collection,
     mine_lock,
     mine_palace_lock,
+    mine_yield_point,
+    open_aaak_collection,
+    palace_write_serial,
+    prefetch_complete_mtimes,
+    print_files_failed,
     purge_file_closets,
+    raise_if_files_failed,
     upsert_closet_lines,
+    write_file_drawers,
 )
 
-# Module-level import so tests can patch it as
-# ``mempalace.miner.compute_hallways_for_wing``. The integration call
-# lives at the end of _mine_impl, alongside the existing
-# ``_compute_topic_tunnels_for_wing`` post-mine block.
-from .collision_scan import assert_no_collisions
-from .hallways import compute_hallways_for_wing
-from .ids import ID_RECIPE, make_drawer_id_from_chunk
+# Re-exported: callers and tests import these from the miner.
+from .project_config import (  # noqa: F401
+    MEMPALACE_PROJECT_FILES,
+    PROJECT_CONFIG_FILENAMES,
+    find_project_config,
+)
+from .source_identity import source_directory_identity
+from .timeutil import utc_now_iso
 
-logger = logging.getLogger("mempalace_mcp")
+logger = logging.getLogger(__name__)
 
 
 def _path_within_root(path: Path, root: Path) -> bool:
@@ -57,27 +77,20 @@ def _path_within_root(path: Path, root: Path) -> bool:
         return False
 
 
-def _read_text_no_follow(filepath: Path, root: Path) -> Optional[str]:
+def _read_text_no_follow(filepath: Path, root: Path) -> Optional[tuple[str, float, str]]:
+    """``(content, mtime, encoding)`` for a regular file under ``root``, else None.
+
+    The mtime is from the same ``fstat`` that validated the file, so callers
+    never need a later ``os.path.getmtime()`` that could observe an append
+    (#22). See ``fsio.read_source_text`` for how the bytes are decoded.
+    """
     if not _path_within_root(filepath, root):
         return None
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = -1
     try:
-        fd = os.open(filepath, flags)
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_SIZE:
-            return None
-        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
-            fd = -1
-            return f.read()
+        content, encoding, mtime = read_source_text(filepath, max_bytes=MAX_FILE_SIZE)
     except OSError:
         return None
-    finally:
-        if fd != -1:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+    return content, mtime, encoding
 
 
 PHP_EXTENSIONS = {
@@ -135,20 +148,28 @@ READABLE_EXTENSIONS = {
     ".toml",
     ".tex",
     ".bib",
+    # C / C++
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".cxx",
+    ".inl",
     # C# / .NET
     ".cs",
     ".csproj",
     ".sln",
     ".razor",
     ".cshtml",
+    # Dynamics 365 Business Central (AL language) source.
+    ".al",
+    # PowerShell scripts, the Windows counterpart of ``.sh`` above.
+    ".ps1",
 } | PHP_EXTENSIONS
 
 SKIP_FILENAMES = {
-    "entities.json",
-    "mempalace.yaml",
-    "mempalace.yml",
-    "mempal.yaml",
-    "mempal.yml",
+    *MEMPALACE_PROJECT_FILES,
     ".gitignore",
     "package-lock.json",
     "pnpm-lock.yaml",
@@ -160,20 +181,19 @@ SKIP_FILENAMES = {
 # ``mempalace.miner`` keep working unchanged. Single source of truth
 # lives in ``config.DEFAULT_CHUNK_*``.
 from .config import (  # noqa: E402  (kept here for the legacy alias)
-    DEFAULT_CHUNK_SIZE as CHUNK_SIZE,
     DEFAULT_CHUNK_OVERLAP as CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE as CHUNK_SIZE,
     DEFAULT_MIN_CHUNK_SIZE as MIN_CHUNK_SIZE,
 )
 
-DRAWER_UPSERT_BATCH_SIZE = 1000
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
 # A safety rail against pathological generated artifacts (lockfiles not in
 # SKIP_FILENAMES, vendored data dumps, etc.). Originally 500 to bound ONNX
-# runtime `bad allocation` errors on Windows (#1296), but at CHUNK_SIZE=800
-# that capped legitimate long-form content (#1455: full-text scholarly
+# runtime `bad allocation` errors on Windows, but at CHUNK_SIZE=800
+# that capped legitimate long-form content (full-text scholarly
 # editions, novels) at ~400 KB. The new default leaves two orders of
 # magnitude of safety margin against the original lockfile case
-# (~1124 chunks for `pnpm-lock.yaml` per #1296) while not touching
+# (~1124 chunks for a large `pnpm-lock.yaml`) while not touching
 # hand-written prose. Per-ONNX-call exposure is bounded by
 # `DRAWER_UPSERT_BATCH_SIZE` (1000 chunks/batch) regardless of this cap,
 # so the cap is a per-file admission rail, not a per-batch limit. Lower
@@ -210,22 +230,14 @@ def _resolve_max_chunks_per_file(override: Optional[int] = None) -> int:
             )
             return MAX_CHUNKS_PER_FILE
         return int(override)
-    raw = os.environ.get("MEMPALACE_MAX_CHUNKS_PER_FILE")
+    raw = env_str("MEMPALACE_MAX_CHUNKS_PER_FILE")
     if raw is None:
         return MAX_CHUNKS_PER_FILE
-    try:
-        val = int(raw)
-    except ValueError:
+    val = parse_number(raw, int)
+    if val is None or val < 0:
         print(
-            f"  ! WARNING: MEMPALACE_MAX_CHUNKS_PER_FILE={raw!r} is not an integer; "
-            f"using default {MAX_CHUNKS_PER_FILE}",
-            file=sys.stderr,
-        )
-        return MAX_CHUNKS_PER_FILE
-    if val < 0:
-        print(
-            f"  ! WARNING: MEMPALACE_MAX_CHUNKS_PER_FILE={val} is negative; "
-            f"using default {MAX_CHUNKS_PER_FILE}",
+            f"  ! WARNING: MEMPALACE_MAX_CHUNKS_PER_FILE={raw!r} is not a non-negative "
+            f"integer; using default {MAX_CHUNKS_PER_FILE}",
             file=sys.stderr,
         )
         return MAX_CHUNKS_PER_FILE
@@ -244,20 +256,16 @@ class GitignoreMatcher:
         self.base_dir = base_dir
         self.rules = rules
 
-    @classmethod
-    def from_dir(cls, dir_path: Path):
-        gitignore_path = dir_path / ".gitignore"
-        if not gitignore_path.is_file():
-            return None
+    @staticmethod
+    def _parse_rules(lines):
+        """Parse an iterable of raw pattern strings into a list of rule dicts.
 
-        try:
-            lines = gitignore_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception:
-            return None
-
+        Shared by :meth:`from_dir` and :meth:`from_patterns` so both paths
+        stay in sync with the gitignore parsing semantics.
+        """
         rules = []
         for raw_line in lines:
-            line = raw_line.strip()
+            line = str(raw_line).strip()
             if not line:
                 continue
 
@@ -289,11 +297,45 @@ class GitignoreMatcher:
                     "negated": negated,
                 }
             )
+        return rules
 
-        if not rules:
+    @classmethod
+    def from_dir(cls, dir_path: Path):
+        gitignore_path = dir_path / ".gitignore"
+        if not gitignore_path.is_file():
             return None
 
+        try:
+            lines = gitignore_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return None
+
+        rules = cls._parse_rules(lines)
+        if not rules:
+            return None
         return cls(dir_path, rules)
+
+    @classmethod
+    def from_patterns(cls, base_dir: Path, patterns):
+        """Create a matcher from an explicit list of gitignore-inspired pattern strings.
+
+        Supports a gitignore-inspired subset of pattern syntax for
+        ``exclude_patterns`` in ``mempalace.yaml``.  Patterns are parsed by
+        the same rule parser used for ``.gitignore`` files, so familiar
+        constructs (trailing ``/`` for dir-only, leading ``/`` for anchoring,
+        ``!`` negation, ``**`` globs) work as expected.  Full gitignore
+        semantics are not guaranteed for every edge case.
+
+        ``patterns`` must be a list of strings.  A single string is coerced
+        to a one-element list for convenience.  Non-string entries are
+        converted via ``str()``.
+        """
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        rules = cls._parse_rules(patterns)
+        if not rules:
+            return None
+        return cls(base_dir, rules)
 
     def matches(self, path: Path, is_dir: bool = None):
         try:
@@ -422,50 +464,72 @@ def is_force_included(path: Path, project_path: Path, include_paths: set) -> boo
     return False
 
 
+def _apply_exclude_patterns_to_prescanned_files(
+    files: list, project_path: Path, exclude_patterns: list, include_ignored: list
+) -> list:
+    """Filter a caller-provided (already-scanned) file list by exclude_patterns.
+
+    scan_project() applies exclude_patterns itself, but a caller that passes
+    its own pre-scanned ``files`` list bypasses that -- so callers reusing a
+    scan (e.g. the init double-scan) still need per-project exclusions
+    applied here. force_include paths are preserved, matching scan_project's
+    own precedence.
+    """
+    include_paths = normalize_include_paths(include_ignored)
+    exclude_matcher = GitignoreMatcher.from_patterns(project_path, exclude_patterns)
+    if exclude_matcher is None:
+        return files
+    return [
+        file_path
+        for file_path in files
+        if is_force_included(file_path, project_path, include_paths)
+        or exclude_matcher.matches(file_path, is_dir=False) is not True
+    ]
+
+
 # =============================================================================
 # CONFIG
 # =============================================================================
 
 
 def load_config(project_dir: str) -> dict:
-    """Load mempalace.yaml from project directory (falls back to mempal.yaml)."""
+    """Load the project config from ``project_dir``.
+
+    Resolution order is :data:`PROJECT_CONFIG_FILENAMES`: ``mempalace.yaml``,
+    ``mempalace.yml``, then the legacy ``mempal.yaml`` and ``mempal.yml``.
+    Without any of them the auto-detected defaults are returned.
+    """
     import yaml
 
     resolved_project_dir = Path(project_dir).expanduser().resolve()
-    config_path = resolved_project_dir / "mempalace.yaml"
-    if not config_path.exists():
-        # Fallback to legacy name
-        legacy_path = resolved_project_dir / "mempal.yaml"
-        if legacy_path.exists():
-            config_path = legacy_path
-        else:
-            from .config import normalize_wing_name
+    config_path = find_project_config(resolved_project_dir)
+    if config_path is None:
+        from .config import normalize_wing_name
 
-            # Normalize the dirname-derived fallback wing the same way
-            # ``cmd_init`` and ``room_detector_local`` do — otherwise a
-            # hyphenated project mined without a yaml file lands under a
-            # raw-name wing while ``topics_by_wing`` was keyed under the
-            # normalized slug, silently dropping every topic tunnel
-            # (the no-yaml branch of issue #1194).
-            wing_name = normalize_wing_name(resolved_project_dir.name)
-            print(
-                f"  No mempalace.yaml found in {resolved_project_dir} "
-                f"— using auto-detected defaults (wing='{wing_name}'). "
-                "Directories with the same basename will share a wing; "
-                "add mempalace.yaml to disambiguate.",
-                file=sys.stderr,
-            )
-            return {
-                "wing": wing_name,
-                "rooms": [
-                    {
-                        "name": "general",
-                        "description": "All project files",
-                        "keywords": ["general"],
-                    }
-                ],
-            }
-    with open(config_path) as f:
+        # Normalize the dirname-derived fallback wing the same way
+        # ``cmd_init`` and ``room_detector_local`` do — otherwise a
+        # hyphenated project mined without a yaml file lands under a
+        # raw-name wing while ``topics_by_wing`` was keyed under the
+        # normalized slug, silently dropping every topic tunnel.
+        wing_name = normalize_wing_name(resolved_project_dir.name)
+        print(
+            f"  No mempalace.yaml found in {resolved_project_dir} "
+            f"— using auto-detected defaults (wing='{wing_name}'). "
+            "Directories with the same basename will share a wing; "
+            "add mempalace.yaml to disambiguate.",
+            file=sys.stderr,
+        )
+        return {
+            "wing": wing_name,
+            "rooms": [
+                {
+                    "name": "general",
+                    "description": "All project files",
+                    "keywords": ["general"],
+                }
+            ],
+        }
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -557,7 +621,7 @@ def chunk_text(
 
     ``line_start`` / ``line_end`` are 1-indexed line numbers in the stripped
     source, giving an approximate locator for where the chunk came from.
-    Closet pointers (Tier 6a) use this to emit ``YYYY-MM-DD:L42-L78`` segments
+    Closet pointers use this to emit ``YYYY-MM-DD:L42-L78`` segments
     so retrieval can jump straight to the right span without opening the
     whole drawer.
 
@@ -575,18 +639,24 @@ def chunk_text(
     # values, but ``chunk_text`` is a public function — direct callers
     # (tests, library users, future caller paths) might still pass
     # values that would loop forever. Fail fast and loud rather than
-    # hang. See review feedback on #1024.
+    # hang.
     if not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ValueError(f"chunk_size must be a positive int, got {chunk_size!r}")
     if not isinstance(chunk_overlap, int) or chunk_overlap < 0:
         raise ValueError(f"chunk_overlap must be a non-negative int, got {chunk_overlap!r}")
-    if chunk_overlap >= chunk_size:
-        # ``start = end - chunk_overlap`` would not advance (or would go
-        # backward) when overlap >= size, producing an infinite loop on
-        # any non-empty input.
+    if chunk_overlap > chunk_size // 2:
+        # The windowing loop pulls ``end`` back to a boundary only when that
+        # boundary is past ``start + chunk_size // 2`` (the rfind guards below),
+        # so a pulled chunk always spans more than ``chunk_size // 2`` chars.
+        # ``start = end - chunk_overlap`` therefore advances only while
+        # ``chunk_overlap <= chunk_size // 2``; a larger overlap makes ``start``
+        # stall or move backward and the loop spins forever on short-line
+        # content. The largest safe value is ``chunk_size // 2`` (half,
+        # rounded down for odd sizes), which still advances and stays allowed.
         raise ValueError(
-            f"chunk_overlap ({chunk_overlap}) must be less than chunk_size "
-            f"({chunk_size}); equality or greater would loop forever"
+            f"chunk_overlap ({chunk_overlap}) must be at most chunk_size // 2 "
+            f"({chunk_size // 2}); a larger overlap can loop forever on "
+            f"short-line content"
         )
     if not isinstance(min_chunk_size, int) or min_chunk_size < 0:
         raise ValueError(f"min_chunk_size must be a non-negative int, got {min_chunk_size!r}")
@@ -599,6 +669,28 @@ def chunk_text(
     chunks = []
     start = 0
     chunk_index = 0
+
+    # Running newline tallies for the 1-indexed (line_start, line_end)
+    # locators emitted below. These replace the previous per-chunk
+    # ``content.count("\n", 0, pos)`` full-prefix rescans, which were O(pos)
+    # each and O(N*K) over K chunks: a 287 MB / ~433k-chunk file scanned
+    # ~1.2e14 bytes and ran for days, indistinguishable from a hang.
+    # ``start`` and ``end`` each advance monotonically for any
+    # ``chunk_overlap < chunk_size // 2`` (the default 800/100 config and
+    # every sane override), so counting only the newly-scanned span is O(N)
+    # total. Each position sequence keeps its own anchor; a backward step
+    # (a paragraph-boundary pull under a pathological near-``chunk_size``
+    # overlap, or a negative index) falls back to the exact full-prefix
+    # count. That fallback is defensive and does not fire on a terminating
+    # mine: the current windowing cannot send a filed chunk's ``start``
+    # backward without also entering a pre-existing infinite loop (overlap
+    # >= chunk_size // 2), so the else-branches read as uncovered. They keep
+    # every value byte-identical to the old form if the windowing ever gains
+    # a loop guard that admits backward steps.
+    _nl_before_start = 0
+    _start_anchor = 0
+    _nl_before_end = 0
+    _end_anchor = 0
 
     while start < len(content):
         end = min(start + chunk_size, len(content))
@@ -615,16 +707,27 @@ def chunk_text(
 
         chunk = content[start:end].strip()
         if len(chunk) >= min_chunk_size:
-            # Tier 6a — 1-indexed line range in the stripped source.
+            # 1-indexed line range in the stripped source.
             # Approximate locator (±1 at boundaries is fine for "jump to
             # roughly here"); exact-quote positioning is a future tier.
-            # Use the bounds form of ``str.count`` (counts on the original
-            # string with start/end limits) instead of slicing — slicing
-            # would allocate a new substring per chunk and produce O(N^2)
-            # work on a 500MB file with 50K chunks. Per PR #1579 review
-            # (gemini-code-assist, medium priority).
-            line_start = content.count("\n", 0, start) + 1
-            line_end = content.count("\n", 0, end) + 1
+            # ``str.count`` with bounds (not slicing) still avoids allocating
+            # a substring per chunk. The incremental anchors
+            # additionally avoid rescanning the whole prefix each time, the
+            # actual O(N*K) cost. Two anchors because ``start`` and
+            # ``end`` are distinct monotonic sequences; a backward step
+            # re-derives the value exactly from position 0.
+            if start >= _start_anchor:
+                _nl_before_start += content.count("\n", _start_anchor, start)
+                _start_anchor = start
+                line_start = _nl_before_start + 1
+            else:
+                line_start = content.count("\n", 0, start) + 1
+            if end >= _end_anchor:
+                _nl_before_end += content.count("\n", _end_anchor, end)
+                _end_anchor = end
+                line_end = _nl_before_end + 1
+            else:
+                line_end = content.count("\n", 0, end) + 1
             chunks.append(
                 {
                     "content": chunk,
@@ -645,7 +748,7 @@ def chunk_text(
 # =============================================================================
 
 
-_ENTITY_REGISTRY_PATH = os.path.join(os.path.expanduser("~"), ".mempalace", "known_entities.json")
+_ENTITY_REGISTRY_PATH = str(paths.state_path("known_entities.json"))
 _ENTITY_REGISTRY_CACHE: dict = {"mtime": None, "names": frozenset(), "raw": {}}
 _ENTITY_EXTRACT_WINDOW = 5000  # chars of content scanned for capitalized words
 _ENTITY_METADATA_LIMIT = 25  # max entities packed into the metadata field
@@ -755,7 +858,71 @@ def _set_wing_topics(existing: dict, wing_key: str, topics_for_wing: list, coerc
         existing.pop("topics_by_wing", None)
 
 
-def add_to_known_entities(entities_by_category: dict, wing: str = None) -> str:
+def _registry_to_merge_into(registry_path) -> Optional[dict]:
+    """The registry to merge into, or ``None`` when nothing may be written.
+
+    The merge rewrites the file whole, so folding a read that did not conclude
+    into an empty dict is what erased every category the registry held. Only
+    ``FileNotFoundError`` establishes that there is no registry here. A
+    truncated write, a byte that is not UTF-8, a hand-edit that lost a brace
+    and a file this process may not read are four different answers, and none
+    of them says the registry was empty.
+
+    A registry that reads but is not a JSON object is renamed aside first, and
+    the empty dict returned then starts a fresh one beside its bytes. A
+    registry that could not be read at all, or could not be moved aside,
+    answers ``None``: what is in memory at that point is one call's entities,
+    and writing those over a registry nobody read is how a permission bit
+    turns into a lost registry.
+
+    Printed rather than logged: the one caller is ``mempalace init``, which
+    configures no logging handler.
+    """
+    import json as _json
+
+    try:
+        raw = registry_path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        print(
+            f"  ! Not writing {registry_path}: it exists and could not be read "
+            f"({exc}), so it is not overwritten",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        # ``utf-8-sig`` rather than ``utf-8``: a BOM is what a Windows editor
+        # leaves on an otherwise valid registry, and ``json.loads`` on bytes
+        # accepts one, so decoding by hand has to accept it too.
+        loaded = _json.loads(raw.decode("utf-8-sig"))
+    except ValueError:
+        # Both failures this catches are ValueErrors: JSONDecodeError for
+        # text that is not JSON, UnicodeDecodeError for bytes that are not
+        # UTF-8. Catching only the first is what let the second out of this
+        # call and into ``mempalace init`` as a traceback.
+        loaded = None
+    if isinstance(loaded, dict):
+        return loaded
+    try:
+        kept_at = move_aside(registry_path, label="unreadable")
+    except OSError as exc:
+        print(
+            f"  ! Not writing {registry_path}: it does not parse and could not be "
+            f"moved aside ({exc}), so it is not overwritten",
+            file=sys.stderr,
+        )
+        return None
+    if kept_at is not None:
+        print(
+            f"  ! Registry at {registry_path} does not parse; "
+            f"kept it as {kept_at} and started a new one",
+            file=sys.stderr,
+        )
+    return {}
+
+
+def add_to_known_entities(entities_by_category: dict, wing: str = None) -> Optional[str]:
     """Union ``entities_by_category`` into ``~/.mempalace/known_entities.json``.
 
     Accepts ``{category: [names]}`` shape as produced by ``mempalace init``
@@ -782,22 +949,20 @@ def add_to_known_entities(entities_by_category: dict, wing: str = None) -> str:
     (notably ``cmd_init`` → ``cmd_mine`` in sequence) see the update
     immediately instead of waiting for a mtime re-check.
 
-    Returns the registry path as a string for logging.
+    Returns the registry path as a string for logging, or ``None`` when the
+    registry was left alone and nothing was written, so a caller does not
+    report an update that did not happen.
     """
-    import json as _json
     from pathlib import Path as _Path
 
     registry_path = _Path(_ENTITY_REGISTRY_PATH)
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
-    existing: dict = {}
-    if registry_path.exists():
-        try:
-            loaded = _json.loads(registry_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                existing = loaded
-        except (_json.JSONDecodeError, OSError):
-            existing = {}
+    # A registry this call cannot merge into is kept rather than written over,
+    # and ``None`` here means nothing was written at all.
+    existing = _registry_to_merge_into(registry_path)
+    if existing is None:
+        return None
 
     def _coerce_name(value):
         if not value:
@@ -853,11 +1018,7 @@ def add_to_known_entities(entities_by_category: dict, wing: str = None) -> str:
     if topics_for_wing is not None:
         _set_wing_topics(existing, wing.strip(), topics_for_wing, _coerce_name)
 
-    registry_path.write_text(_json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        registry_path.chmod(0o600)
-    except (OSError, NotImplementedError):
-        pass
+    atomic_write_json(registry_path, existing)
 
     # Invalidate in-process cache so later calls in the same run see the write.
     _ENTITY_REGISTRY_CACHE["mtime"] = None
@@ -945,7 +1106,7 @@ def _extract_entities_for_metadata(content: str) -> str:
 
     coca_filter = _get_coca_filter()
     window = content[:_ENTITY_EXTRACT_WINDOW]
-    # Tier 3 linguistics cleanup — known-systems compound pre-pass. Detects
+    # Known-systems compound pre-pass. Detects
     # multi-word product names atomically and masks them from the window so
     # the single-word extraction below doesn't decompose them into their
     # constituent tokens (which would then either get COCA-filtered or
@@ -956,7 +1117,7 @@ def _extract_entities_for_metadata(content: str) -> str:
     for w in words:
         if w in _ENTITY_STOPLIST:
             continue
-        # Tier 2 linguistics cleanup — drop common English content words
+        # Drop common English content words
         # ("Code", "Line", "Note", "Phase", …) from per-drawer entity
         # metadata so they don't poison hallways/tunnels/search.
         if w.lower() in coca_filter:
@@ -974,7 +1135,7 @@ def _extract_entities_for_metadata(content: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tier 6a content-date extraction
+# Content-date extraction
 #
 # Hierarchy (first match wins):
 #   1. Filename — ISO regex on stem, then dateutil fuzzy parse for natural-
@@ -1002,15 +1163,15 @@ _SLASH_DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
 
 # Gate for dateutil fallback. A candidate string must match ONE of these
 # patterns to be considered a real date — otherwise dateutil's fuzzy mode
-# would hallucinate dates from any digit-bearing text (Igor's reproductions
-# on PR #1584: "tmp_random_file_5" → 2026-05-05, "Version 3.3.6" → 2006-03-03,
+# would hallucinate dates from any digit-bearing text (for example
+# "tmp_random_file_5" → 2026-05-05, "Version 3.3.6" → 2006-03-03,
 # "Tested with 1000 drawers" → 1000-05-22, etc.). The fuzzy=True flag is
 # never set — dateutil only runs in strict mode on a substring we've
 # already validated.
 #
 # Three accepted shapes (all require a 4-digit year explicitly):
-#   1. Numeric: 4-digit year + separator + 1-2 digit month + separator + 1-2 digit day
-#      ("2024-11-08", "2024 11 08", "2024/06/15", "2024.11.08")
+#   1. Numeric: 4-digit year + separator + 1-2 digit month + separator + 1-2 digit day,
+#      for example 2024-11-08, 2024 11 08, 2024/06/15 or 2024.11.08
 #   2. Month-name + day + year: "November 8 2024", "Nov 8 2024", "Apr 6 2011"
 #   3. Day + month-name + year: "8 November 2024", "8 Nov 2024", "6 April 2011"
 #
@@ -1101,7 +1262,7 @@ def _try_frontmatter_date(content: str) -> Optional[str]:
     Uses ``str.find`` to locate the closing ``\\n---`` delimiter and slices
     the frontmatter directly. The earlier implementation split the entire
     file into lines just to scan the first handful — wasteful on large
-    files. Per PR #1579 review (gemini-code-assist, medium priority).
+    files.
     """
     if not content:
         return None
@@ -1158,7 +1319,7 @@ def _try_content_body_date(content: str) -> Optional[str]:
 
     Uses ``str.find`` to skip frontmatter and bounded ``str.split(..., 10)``
     to bound the head extraction — never materializes a full line-list on a
-    large file. Per PR #1579 review (gemini-code-assist, medium priority).
+    large file.
     """
     if not content:
         return None
@@ -1240,28 +1401,37 @@ def _extract_content_date(source_file: str, content: str) -> Optional[str]:
     Returns ISO 'YYYY-MM-DD' string, or None if no date can be determined.
     See module-level comment block for the full hierarchy + design rationale.
     """
+    return _extract_content_date_with_source(source_file, content)[0]
+
+
+def _extract_content_date_with_source(source_file: str, content: str) -> tuple[Optional[str], str]:
+    """Return the inferred date and its evidence source, not verified authorship.
+
+    Preserve the existing extraction precedence. ``unknown`` means no date
+    was found; callers must not treat filing time as an extracted date.
+    """
     # 1. Filename
     result = _try_filename_date(source_file)
     if result:
-        return result
+        return result, "filename"
 
     # 2. YAML frontmatter
     result = _try_frontmatter_date(content)
     if result:
-        return result
+        return result, "frontmatter"
 
     # 3. Content body
     result = _try_content_body_date(content)
     if result:
-        return result
+        return result, "body"
 
     # 4. Filesystem mtime
     result = _try_mtime_date(source_file)
     if result:
-        return result
+        return result, "mtime"
 
     # 5. Nothing found — caller falls back to filed_at.
-    return None
+    return None, "unknown"
 
 
 def _build_drawer_metadata(
@@ -1275,6 +1445,9 @@ def _build_drawer_metadata(
     line_start: Optional[int] = None,
     line_end: Optional[int] = None,
     content_date: Optional[str] = None,
+    content_date_source: Optional[str] = None,
+    source_dir_ino: Optional[str] = None,
+    source_encoding: str = "utf-8",
 ) -> dict:
     """Build the metadata dict for one drawer without upserting.
 
@@ -1282,7 +1455,7 @@ def _build_drawer_metadata(
     of a file into a single ``collection.upsert`` — one embedding forward
     pass per batch instead of per chunk.
 
-    Tier 6a — ``line_start`` / ``line_end`` are optional 1-indexed line
+    ``line_start`` / ``line_end`` are optional 1-indexed line
     numbers in the source file. ``content_date`` is the optional ISO date
     extracted from filename / frontmatter / content body / mtime. When
     passed, they're stored in metadata so closet pointers can carry
@@ -1290,6 +1463,23 @@ def _build_drawer_metadata(
     (legacy callers, pre-Tier-6a drawers), the keys are absent from the
     returned dict and downstream code falls back to ``filed_at`` for the
     date and the 3-segment closet pointer format.
+
+    ``content_date_source`` records which extraction tier supplied the
+    date: filename, frontmatter, body, or mtime. A supplied date with no
+    recorded source is marked ``unknown``, never inferred retroactively.
+
+    ``source_dir_ino`` — the inode of the directory this file was read
+    from, as ``source_identity`` takes it. ``sync`` compares it against the
+    inode answering at the moment the verdict is formed, so a volume that is
+    away, a volume mounted in its place, and a bind mount over it all fail to
+    corroborate a removal. ``None`` when the directory could not be stat'ed,
+    and the key is then absent, which leaves that drawer exactly where it
+    was.
+
+    ``source_encoding`` is the codec the file decoded with; it is stamped
+    only when it is not UTF-8.
+
+    ``chunk_total`` (see #21) is stamped by ``write_file_drawers``, not here.
     """
     metadata = {
         "wing": wing,
@@ -1297,7 +1487,7 @@ def _build_drawer_metadata(
         "source_file": source_file,
         "chunk_index": chunk_index,
         "added_by": agent,
-        "filed_at": datetime.now().isoformat(),
+        "filed_at": utc_now_iso(),
         "normalize_version": NORMALIZE_VERSION,
         "id_recipe": ID_RECIPE,
     }
@@ -1309,6 +1499,10 @@ def _build_drawer_metadata(
         metadata["line_end"] = line_end
     if content_date:
         metadata["content_date"] = content_date
+        metadata["content_date_source"] = content_date_source or "unknown"
+    if source_dir_ino:
+        metadata["source_dir_ino"] = source_dir_ino
+    metadata.update(encoding_metadata(source_encoding))
     metadata["hall"] = detect_hall(content)
     entities = _extract_entities_for_metadata(content)
     if entities:
@@ -1330,8 +1524,18 @@ def add_drawer(
         source_mtime = os.path.getmtime(source_file)
     except OSError:
         source_mtime = None
+    # An external caller's drawer names a source file the same way a mined one
+    # does, and ``sync`` decides both by the same rule.
+    source_dir_ino = source_directory_identity(source_file)
     metadata = _build_drawer_metadata(
-        wing, room, source_file, chunk_index, agent, content, source_mtime
+        wing,
+        room,
+        source_file,
+        chunk_index,
+        agent,
+        content,
+        source_mtime,
+        source_dir_ino=source_dir_ino,
     )
     collection.upsert(
         documents=[content],
@@ -1344,6 +1548,24 @@ def add_drawer(
 # =============================================================================
 # PROCESS ONE FILE
 # =============================================================================
+
+
+def _prefetched_as_mined(source_file: str, mined_mtimes: Optional[dict]) -> bool:
+    """True when the prefetched groups prove ``file_already_mined()`` would
+    return True: a complete group's stored mtime matches the file's on-disk
+    mtime within the same 1 ms tolerance. False means "ask the palace", never
+    "not mined".
+    """
+    if not mined_mtimes:
+        return False
+    stored = mined_mtimes.get(source_file)
+    if not stored:
+        return False
+    try:
+        current_mtime = os.path.getmtime(source_file)
+    except OSError:
+        return False
+    return any(abs(mtime - current_mtime) < 0.001 for mtime in stored)
 
 
 def process_file(
@@ -1359,6 +1581,8 @@ def process_file(
     chunk_overlap: int = None,
     min_chunk_size: int = None,
     max_chunks_per_file: Optional[int] = None,
+    mined_mtimes: Optional[dict] = None,
+    aaak_col=None,
 ) -> tuple:
     """Read, chunk, route, and file one file.
 
@@ -1367,18 +1591,29 @@ def process_file(
     filed (pre- or post-lock re-check), unreadable (``OSError``), or
     too-short content (below ``min_chunk_size``). It is ``"chunk_cap"``
     when the per-file chunk cap aborted the file. Callers use the tag to
-    surface a separate counter in the mine summary (see #1455).
+    surface a separate counter in the mine summary. It is
+    ``"purge_failed"`` when the stale-drawer purge raised: the new drawers
+    stay marked unfinished, and the mine counts it as an error rather than a
+    skip.
+
+    ``mined_mtimes`` is :func:`prefetch_complete_mtimes`'s map for this
+    mine. A file it proves already filed is skipped without querying the
+    palace; any other file goes through ``file_already_mined()``.
     """
     effective_min = min_chunk_size if min_chunk_size is not None else MIN_CHUNK_SIZE
 
     # Skip if already filed
     source_file = str(filepath)
-    if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
+    if not dry_run and (
+        _prefetched_as_mined(source_file, mined_mtimes)
+        or file_already_mined(collection, source_file, check_mtime=True)
+    ):
         return 0, "general", None
 
-    content = _read_text_no_follow(filepath, project_path)
-    if content is None:
+    read_result = _read_text_no_follow(filepath, project_path)
+    if read_result is None:
         return 0, "general", None
+    content, read_mtime, source_encoding = read_result
 
     content = content.strip()
     if len(content) < effective_min:
@@ -1412,95 +1647,91 @@ def process_file(
         print(f"    [DRY RUN] {filepath.name} -> room:{room} ({len(chunks)} drawers)")
         return len(chunks), room, None
 
-    # Lock this file so concurrent agents don't interleave delete+insert.
-    # Without the lock, two agents can both pass file_already_mined(),
-    # both delete, and both insert — creating duplicates or losing data.
+    # Lock this file so concurrent agents don't interleave their writes and
+    # prunes. Without the lock, two agents can both pass file_already_mined()
+    # and both file the file — creating duplicates or losing data.
     with mine_lock(source_file):
         # Re-check after acquiring lock — another agent may have just finished
         if file_already_mined(collection, source_file, check_mtime=True):
             return 0, room, None
 
-        # Purge stale drawers for this file before re-inserting the fresh chunks.
-        # Converts modified-file re-mines from upsert-over-existing-IDs (which hits
-        # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
-        # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
-        # path entirely.
-        try:
-            collection.delete(where={"source_file": source_file})
-        except Exception:
-            logger.debug("Stale-drawer purge failed for %s", source_file, exc_info=True)
+        # source_mtime is the mtime paired with the content actually read
+        # above (from _read_text_no_follow's own fstat), not a fresh re-stat
+        # here -- see #22. Re-statting separately can observe a file that was
+        # appended to between the read and this point, stamping drawers with
+        # an mtime that doesn't match what was actually chunked; the next
+        # mine's freshness check then sees stored-mtime == current-disk-mtime
+        # and silently, permanently skips the appended tail.
+        source_mtime = read_mtime
 
-        # Batch chunks into bounded upserts so the embedding model sees many
-        # chunks per forward pass without building one huge Chroma/SQLite
-        # request for pathological files. A bad chunk can fail its sub-batch;
-        # that is the deliberate trade-off for amortizing embedding overhead.
-        try:
-            source_mtime = os.path.getmtime(source_file)
-        except OSError:
-            source_mtime = None
+        # Which directory this file is being read from, taken as its inode
+        # so ``sync`` can ask the same question later. Nothing is written to
+        # the source tree for this. A directory that cannot be stat'ed answers
+        # None and the drawers carry no identity, which is what every drawer
+        # filed before this looked like.
+        source_dir_ino = source_directory_identity(filepath)
 
-        # Tier 6a content-date: extract once per file (not per chunk) and
+        # Content date: extract once per file (not per chunk) and
         # share across all chunks. Reads filename / frontmatter / content /
         # mtime hierarchy. Returns None when nothing usable found → caller
         # falls back to filed_at downstream.
-        file_content_date = _extract_content_date(source_file, content)
+        file_content_date, file_content_date_source = _extract_content_date_with_source(
+            source_file, content
+        )
 
-        drawers_added = 0
-        # Accumulate drawer metadata across batches so the closet emitter
-        # below can consume it (Tier 6a date+line locators). Without this,
-        # the new ``drawer_metas`` kwarg never reaches ``build_closet_lines``
-        # in production and the 4-segment pointer form lives only in tests.
-        # Per PR #1584 review (Igor, 2026-05-22).
-        all_metas: list = []
-        for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
-            batch_docs: list = []
-            batch_ids: list = []
-            batch_metas: list = []
-            for chunk in chunks[batch_start : batch_start + DRAWER_UPSERT_BATCH_SIZE]:
-                drawer_id = make_drawer_id_from_chunk(wing, room, source_file, chunk["chunk_index"])
-                batch_docs.append(chunk["content"])
-                batch_ids.append(drawer_id)
-                batch_metas.append(
-                    _build_drawer_metadata(
-                        wing,
-                        room,
-                        source_file,
-                        chunk["chunk_index"],
-                        agent,
-                        chunk["content"],
-                        source_mtime,
-                        line_start=chunk.get("line_start"),
-                        line_end=chunk.get("line_end"),
-                        content_date=file_content_date,
-                    )
-                )
-            assert_no_collisions(list(zip(batch_ids, batch_metas)), collection)
-            collection.upsert(
-                documents=batch_docs,
-                ids=batch_ids,
-                metadatas=batch_metas,
+        drawers = [
+            (
+                make_drawer_id_from_chunk(wing, room, source_file, chunk["chunk_index"]),
+                chunk["content"],
+                _build_drawer_metadata(
+                    wing,
+                    room,
+                    source_file,
+                    chunk["chunk_index"],
+                    agent,
+                    chunk["content"],
+                    source_mtime,
+                    line_start=chunk.get("line_start"),
+                    line_end=chunk.get("line_end"),
+                    content_date=file_content_date,
+                    content_date_source=file_content_date_source,
+                    source_dir_ino=source_dir_ino,
+                    source_encoding=source_encoding,
+                ),
             )
-            drawers_added += len(batch_docs)
-            all_metas.extend(batch_metas)
+            for chunk in chunks
+        ]
+        # Every drawer for this path is replaced, whichever miner filed it.
+        # A failed stale-drawer purge is an error the mine counts, not a skip.
+        try:
+            drawers_added = write_file_drawers(collection, source_file, drawers, aaak_col=aaak_col)
+        except StaleDrawerPurgeFailed as exc:
+            print(f"  ! [error] {filepath.name[:50]:50} {exc}", file=sys.stderr)
+            return 0, room, "purge_failed"
 
         # Build closet — the searchable index pointing to these drawers.
-        # Purge first: a re-mine (mtime change or normalize_version bump) must
-        # fully replace the prior closets, not append to them.
+        # Purge unconditionally: the old drawers this closet pointed at are
+        # gone, so a re-mine that ends up with zero filed drawers must still
+        # end up with zero closets, not stale ones dangling on deleted drawer
+        # IDs (see #24). Only the closet rebuild itself is conditional on
+        # there being new drawers to point at. A re-file that changed nothing
+        # keeps the closets it has, including LLM-generated ones.
+        if getattr(drawers_added, "unchanged", False):
+            closets_col = None
+        if closets_col:
+            purge_file_closets(closets_col, source_file)
         if closets_col and drawers_added > 0:
-            drawer_ids = [
-                make_drawer_id_from_chunk(wing, room, source_file, c["chunk_index"]) for c in chunks
-            ]
-            # Pass drawer_metas so build_closet_lines can emit the Tier 6a
+            # Pass drawer_metas so build_closet_lines can emit the
             # 4-segment pointer (``topic|entities|YYYY-MM-DD:Lstart-Lend|→ids``)
             # when line_start / line_end / content_date are present. Falls
             # back to the legacy 3-segment form automatically when not.
             closet_lines = build_closet_lines(
                 source_file,
-                drawer_ids,
+                [drawer_id for drawer_id, _, _ in drawers],
                 content,
                 wing,
                 room,
-                drawer_metas=all_metas,
+                drawer_metas=[meta for _, _, meta in drawers],
             )
             closet_id_base = (
                 f"closet_{wing}_{room}_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
@@ -1510,13 +1741,12 @@ def process_file(
                 "wing": wing,
                 "room": room,
                 "source_file": source_file,
-                "drawer_count": drawers_added,
-                "filed_at": datetime.now().isoformat(),
+                "drawer_count": int(drawers_added),
+                "filed_at": utc_now_iso(),
                 "normalize_version": NORMALIZE_VERSION,
             }
             if entities:
                 closet_meta["entities"] = entities
-            purge_file_closets(closets_col, source_file)
             upsert_closet_lines(closets_col, closet_id_base, closet_lines, closet_meta)
 
     return drawers_added, room, None
@@ -1531,6 +1761,7 @@ def scan_project(
     project_dir: str,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    exclude_patterns: list = None,
 ) -> list:
     """Return list of all readable file paths under ``project_dir``.
 
@@ -1543,6 +1774,7 @@ def scan_project(
     active_matchers = []
     matcher_cache = {}
     include_paths = normalize_include_paths(include_ignored)
+    exclude_matcher = GitignoreMatcher.from_patterns(project_path, exclude_patterns or [])
 
     for root, dirs, filenames in os.walk(project_path):
         root_path = Path(root)
@@ -1570,6 +1802,13 @@ def scan_project(
                 if is_force_included(root_path / d, project_path, include_paths)
                 or not is_gitignored(root_path / d, active_matchers, is_dir=True)
             ]
+        if exclude_matcher:
+            dirs[:] = [
+                d
+                for d in dirs
+                if is_force_included(root_path / d, project_path, include_paths)
+                or exclude_matcher.matches(root_path / d, is_dir=True) is not True
+            ]
 
         for filename in filenames:
             filepath = root_path / filename
@@ -1583,6 +1822,15 @@ def scan_project(
             if respect_gitignore and active_matchers and not force_include:
                 if is_gitignored(filepath, active_matchers, is_dir=False):
                     continue
+            # Skip files matching project-level exclude_patterns (mempalace.yaml).
+            # force_include paths bypass this check so callers can selectively
+            # re-include files that would otherwise be excluded.
+            if (
+                not force_include
+                and exclude_matcher
+                and exclude_matcher.matches(filepath, is_dir=False)
+            ):
+                continue
             # Skip symlinks — prevents following links to /dev/urandom, etc.
             if filepath.is_symlink():
                 rel = filepath.relative_to(project_path).as_posix()
@@ -1594,10 +1842,22 @@ def scan_project(
             # Skip files exceeding size limit, or those whose stat() raises
             # (permission denied, racing delete, broken symlink that survived
             # the earlier is_symlink check). Both branches log to stderr to
-            # match the SKIP: (symlink) line above; silent drops at this
-            # gate were the original #923 complaint.
+            # match the SKIP: (symlink) line above, so no file is dropped
+            # here without a word.
             try:
-                file_size = filepath.stat().st_size
+                file_stat = filepath.stat()
+                # Reject anything that is not a regular file before it can
+                # reach a reader. os.walk lists FIFOs, sockets and device
+                # nodes as plain filenames and the extension filter above
+                # decides by name, so ``notes.md`` can be a named pipe.
+                # stat() itself never blocks on one; opening it can.
+                if not stat.S_ISREG(file_stat.st_mode):
+                    print(
+                        f"  SKIP: {filepath.name} (not a regular file)",
+                        file=sys.stderr,
+                    )
+                    continue
+                file_size = file_stat.st_size
                 if file_size > MAX_FILE_SIZE:
                     print(
                         f"  SKIP: {filepath.name} ({file_size / (1024 * 1024):.1f} MB)"
@@ -1621,7 +1881,7 @@ def scan_project(
 
 
 # =============================================================================
-# MAIN: MINE
+# The project mine
 # =============================================================================
 
 
@@ -1648,7 +1908,7 @@ def mine(
     ``max_chunks_per_file`` overrides the per-file chunk cap (see
     :func:`_resolve_max_chunks_per_file`). ``None`` defers to
     ``MEMPALACE_MAX_CHUNKS_PER_FILE`` or ``MAX_CHUNKS_PER_FILE``; ``0``
-    disables the cap entirely (#1455).
+    disables the cap entirely.
     """
     if dry_run:
         return _mine_impl(
@@ -1696,6 +1956,7 @@ def _mine_impl(
 ):
     from .config import MempalaceConfig
 
+    writes_at_start = palace_write_serial()
     project_path = Path(project_dir).expanduser().resolve()
     config = load_config(project_dir)
     palace_config = MempalaceConfig()
@@ -1706,15 +1967,25 @@ def _mine_impl(
 
     wing = wing_override or config["wing"]
     rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
+    exclude_patterns = config.get("exclude_patterns", [])
 
     if files is None:
         files = scan_project(
             project_dir,
             respect_gitignore=respect_gitignore,
             include_ignored=include_ignored,
+            exclude_patterns=exclude_patterns,
         )
+    elif exclude_patterns:
+        files = _apply_exclude_patterns_to_prescanned_files(
+            files, project_path, exclude_patterns, include_ignored
+        )
+
     from .embedding import describe_device
 
+    # Resolved before the header: an explicit device torch cannot use warns
+    # here, so the warning is printed above the header, not inside it.
+    device = describe_device()
     print(f"\n{'=' * 55}")
     print("  MemPalace Mine")
     print(f"{'=' * 55}")
@@ -1723,9 +1994,9 @@ def _mine_impl(
     limit_suffix = f" (limit: {limit} new)" if limit > 0 else ""
     print(f"  Files:   {len(files)}{limit_suffix}")
     print(f"  Palace:  {palace_path}")
-    print(f"  Device:  {describe_device()}")
+    print(f"  Device:  {device}")
     if dry_run:
-        print("  DRY RUN — nothing will be filed")
+        print("  DRY RUN -- nothing will be filed")
     if not respect_gitignore:
         print("  .gitignore: DISABLED")
     if include_ignored:
@@ -1735,14 +2006,22 @@ def _mine_impl(
     if not dry_run:
         collection = get_collection(palace_path)
         closets_col = get_closets_collection(palace_path)
+        aaak_col = open_aaak_collection(palace_path)
+        # One sqlite pass instead of one get(where=source_file) per file,
+        # which costs ~0.1 s each on a 1M-drawer palace. None on
+        # other backends: every file then takes the per-file check.
+        mined_mtimes = prefetch_complete_mtimes(collection, [str(f) for f in files])
     else:
         collection = None
         closets_col = None
+        aaak_col = None
+        mined_mtimes = None
 
     total_drawers = 0
     files_mined = 0
     files_skipped = 0
     files_skipped_chunk_cap = 0
+    files_failed: list = []
     files_processed = 0
     last_file = None
     room_counts = defaultdict(int)
@@ -1750,6 +2029,7 @@ def _mine_impl(
 
     try:
         for i, filepath in enumerate(files, 1):
+            collection, closets_col = _yield_and_reopen(palace_path, collection, closets_col)
             try:
                 drawers, room, skip_reason = process_file(
                     filepath=filepath,
@@ -1760,6 +2040,7 @@ def _mine_impl(
                     agent=agent,
                     dry_run=dry_run,
                     closets_col=closets_col,
+                    aaak_col=aaak_col,
                     chunk_size=cfg_chunk_size,
                     chunk_overlap=cfg_chunk_overlap,
                     min_chunk_size=cfg_min_chunk_size,
@@ -1768,6 +2049,7 @@ def _mine_impl(
                     # otherwise a malformed env var would emit its warning
                     # per file.
                     max_chunks_per_file=effective_chunk_cap,
+                    mined_mtimes=mined_mtimes,
                 )
             except KeyboardInterrupt:
                 # Re-raise so the outer handler prints the summary; we
@@ -1780,8 +2062,11 @@ def _mine_impl(
             # modes so the summary "Files processed" arithmetic and the
             # residual-skip counter stay honest under ``--dry-run`` too. The
             # chunk-cap counter is partitioned out for its dedicated
-            # summary line (see #1455 + Gemini review on PR #1554).
-            if drawers == 0:
+            # summary line. A file
+            # that failed is neither skipped nor mined.
+            if skip_reason == "purge_failed":
+                files_failed.append(str(filepath))
+            elif drawers == 0:
                 files_skipped += 1
                 if skip_reason == "chunk_cap":
                     files_skipped_chunk_cap += 1
@@ -1795,12 +2080,15 @@ def _mine_impl(
                     break
 
         if not dry_run:
+            from .config import MempalaceConfig
+
+            graph_config = MempalaceConfig(palace_path=palace_path)
             # Cross-wing topic tunnels: after every file in this wing has been
             # processed, link this wing to any other wing that shares a
             # confirmed TOPIC label. Out of scope for v1: manifest-dependency
             # overlap, per-topic allow/deny lists, search-result surfacing.
             try:
-                tunnels_added = _compute_topic_tunnels_for_wing(wing)
+                tunnels_added = _compute_topic_tunnels_for_wing(wing, config=graph_config)
                 if tunnels_added:
                     print(f"\n  Topic tunnels: +{tunnels_added} cross-wing link(s)")
             except Exception as e:
@@ -1816,7 +2104,9 @@ def _mine_impl(
             # must never fail a mine; it's a derived analytic, not load-bearing
             # for the drawer write that already committed above.
             try:
-                hallways_created = compute_hallways_for_wing(wing, col=collection)
+                hallways_created = compute_hallways_for_wing(
+                    wing, col=collection, config=graph_config
+                )
                 if hallways_created:
                     print(f"\n  Hallways: +{len(hallways_created)} within-wing entity link(s)")
             except Exception as e:
@@ -1832,7 +2122,7 @@ def _mine_impl(
             # ``kind="entity"`` / ``kind="topic"``. Same fault-tolerance
             # pattern: never fail a mine over a derived analytic.
             try:
-                entity_tunnels_added = _compute_entity_tunnels_for_wing(wing)
+                entity_tunnels_added = _compute_entity_tunnels_for_wing(wing, config=graph_config)
                 if entity_tunnels_added:
                     print(f"\n  Entity tunnels: +{entity_tunnels_added} cross-wing entity link(s)")
             except Exception as e:
@@ -1841,11 +2131,12 @@ def _mine_impl(
                     file=sys.stderr,
                 )
 
-            _validate_palace_fts5_after_mine(palace_path)
+            _validate_palace_fts5_after_mine(palace_path, writes_since=writes_at_start)
 
         print(f"\n{'=' * 55}")
         print("  Done.")
-        print(f"  Files processed: {files_processed - files_skipped}")
+        print(f"  Files processed: {files_processed - files_skipped - len(files_failed)}")
+        print_files_failed(files_failed)
         # The residual skip bucket label depends on mode: dry-run bypasses
         # the already-mined check, so the only paths producing (0, room,
         # None) under dry_run are OSError / too-short / post-lock re-check
@@ -1867,9 +2158,7 @@ def _mine_impl(
                 f"set 0 to disable)"
             )
         print(f"  Drawers filed: {total_drawers}")
-        print("\n  By room:")
-        for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {room:20} {count} files")
+        _print_room_counts(room_counts)
         print('\n  Next: mempalace search "what you\'re looking for"')
         print(f"{'=' * 55}\n")
     except KeyboardInterrupt:
@@ -1888,7 +2177,7 @@ def _mine_impl(
         )
         sys.exit(130)
     except MineValidationError:
-        # End-of-mine FTS5 validation failed (#1537). The loop completed
+        # End-of-mine FTS5 validation failed. The loop completed
         # successfully; cmd_mine prints the recovery banner. Don't print a
         # "Mine aborted" partial-progress summary here: the mine didn't
         # abort mid-loop, the post-write integrity check did, and the
@@ -1898,7 +2187,7 @@ def _mine_impl(
         # Without this, an arbitrary exception (ONNX bad_alloc, chromadb HNSW
         # error, OS fault) propagates and the process exits with no completion
         # banner — the operator sees only the final progress line and assumes
-        # the mine succeeded (#1296). Print the partial-progress summary the
+        # the mine succeeded. Print the partial-progress summary the
         # way we do for KeyboardInterrupt, then re-raise so the original
         # traceback still surfaces and the exit code is non-zero.
         print("\n\n  Mine aborted by exception.")
@@ -1913,13 +2202,35 @@ def _mine_impl(
         )
         raise
     finally:
-        # Clean up the hooks-side PID lock if it points at us. Stale
-        # entries already pass _pid_alive() == False on POSIX, but
-        # actively removing the file makes the state observable
+        # Clean up the hooks-side PID lock if it points at us. A stale
+        # entry already fails _pid_alive(), but actively removing the
+        # file makes the state observable
         # (callers can stat it) and avoids accidental PID reuse on
         # short-lived test runs. Only remove if the file claims our
         # own PID — never another process's.
         _cleanup_mine_pid_file()
+
+    # After the summary, so the operator still sees what was filed.
+    raise_if_files_failed(files_failed, files_processed)
+
+
+def _print_room_counts(room_counts) -> None:
+    print("\n  By room:")
+    for room, count in sorted(room_counts.items(), key=lambda x: x[1], reverse=True):
+        print(f"    {room:20} {count} files")
+
+
+def _yield_and_reopen(palace_path, collection, closets_col):
+    """Pass a file boundary, reopening the collections if requests ran in it.
+
+    A request in the hub's handoff may close the backend under these handles
+    (a search resets the Chroma caches after a transient index error).
+    Reopening returns the cached collection when nothing closed it. A dry run
+    holds no collections and gets ``None`` back.
+    """
+    if not mine_yield_point() or collection is None:
+        return collection, closets_col
+    return get_collection(palace_path), get_closets_collection(palace_path)
 
 
 def _cleanup_mine_pid_file() -> None:
@@ -1944,8 +2255,8 @@ def _cleanup_mine_pid_file() -> None:
         if not pid_file.exists():
             return
         recorded = pid_file.read_text().strip()
-        # PID file format: "{pid} {unix_timestamp}" (timestamp added in
-        # #1552 for stale-by-age detection).  Old-format files (bare
+        # PID file format: "{pid} {unix_timestamp}" (the timestamp drives
+        # stale-by-age detection).  Old-format files (bare
         # "{pid}") are also handled: split on whitespace and take the
         # first token as the PID.
         pid_token = recorded.split()[0] if recorded else ""
@@ -1956,7 +2267,7 @@ def _cleanup_mine_pid_file() -> None:
         pass
 
 
-def _compute_topic_tunnels_for_wing(wing: str) -> int:
+def _compute_topic_tunnels_for_wing(wing: str, config=None) -> int:
     """Drop tunnels between ``wing`` and every other wing that shares
     confirmed topics, honoring the ``topic_tunnel_min_count`` config knob.
 
@@ -1969,13 +2280,13 @@ def _compute_topic_tunnels_for_wing(wing: str) -> int:
     topics_map = get_topics_by_wing()
     if not topics_map or wing not in topics_map:
         return 0
-    cfg = MempalaceConfig()
+    cfg = config or MempalaceConfig()
     min_count = cfg.topic_tunnel_min_count
-    created = topic_tunnels_for_wing(wing, topics_map, min_count=min_count)
+    created = topic_tunnels_for_wing(wing, topics_map, min_count=min_count, config=cfg)
     return len(created)
 
 
-def _compute_entity_tunnels_for_wing(wing: str) -> int:
+def _compute_entity_tunnels_for_wing(wing: str, config=None) -> int:
     """Drop tunnels between ``wing`` and every other wing that shares an
     entity via the within-wing hallway primitive.
 
@@ -1993,10 +2304,10 @@ def _compute_entity_tunnels_for_wing(wing: str) -> int:
     from .hallways import list_hallways
     from .palace_graph import entity_tunnels_for_wing
 
-    hallways = list_hallways()
+    hallways = list_hallways(config=config)
     if not hallways:
         return 0
-    created = entity_tunnels_for_wing(wing, hallways)
+    created = entity_tunnels_for_wing(wing, hallways, config=config)
     return len(created)
 
 
@@ -2010,12 +2321,13 @@ def status(palace_path: str):
 
     Tallies drawers by wing/room directly from ``chroma.sqlite3`` so a routine
     status check never cold-loads the HNSW vector index — a load that costs
-    tens of seconds of CPU per call on large palaces (#1681). Falls back to the
+    tens of seconds of CPU per call on large palaces. Falls back to the
     ChromaDB client path when the sqlite read is unavailable (missing DB,
     un-bootstrapped collection, or an unexpected schema); the fallback also
     emits the state-specific guidance for absent/empty palaces.
     """
-    from .backends.chroma import _sqlite_wing_room_counts
+    from .backends.chroma import hnsw_capacity_status
+    from .backends.chroma_sqlite import _sqlite_wing_room_counts
 
     counts = _sqlite_wing_room_counts(palace_path, "mempalace_drawers")
     if counts is not None:
@@ -2027,9 +2339,32 @@ def status(palace_path: str):
     if col is None:
         return
 
+    # Preflight HNSW divergence before falling back to the ChromaDB client
+    # path: count() on a diverged segment can hit a native SIGSEGV/panic
+    # class, which a try/except around count() cannot catch. This fallback
+    # only runs when the direct sqlite read above was unavailable, so it's
+    # the one place in this function that still touches count() directly.
+    capacity_info = hnsw_capacity_status(palace_path, "mempalace_drawers")
+    if capacity_info.get("diverged"):
+        print(f"\n  HNSW index is diverged: {capacity_info.get('message', '')}")
+        print("  Run `mempalace repair --mode from-sqlite --archive-existing` first.")
+        return
+
+    # Fast path: single-pass metadata fetch for backends that expose
+    # get_all_metadata(). Avoids the O(n^2) offset loop below.
+    get_all = getattr(col, "get_all_metadata", None)
+    if callable(get_all):
+        metas = [m or {} for m in get_all() if not is_bookkeeping(m)]
+        wing_rooms: dict = defaultdict(lambda: defaultdict(int))
+        for m in metas:
+            wing_rooms[m.get("wing", "?")][m.get("room", "?")] += 1
+        _print_status(len(metas), wing_rooms)
+        return
+
     # Count by wing and room — paginate to avoid SQLite "too many SQL
-    # variables" error on large palaces (see #802, #850).
+    # variables" error on large palaces.
     total = col.count()
+    bookkeeping = 0
     wing_rooms: dict = defaultdict(lambda: defaultdict(int))
     batch_size = 5000
     offset = 0
@@ -2039,17 +2374,33 @@ def status(palace_path: str):
         if not batch:
             break
         for m in batch:
+            if is_bookkeeping(m):
+                bookkeeping += 1
+                continue
             m = m or {}
             wing_rooms[m.get("wing", "?")][m.get("room", "?")] += 1
         offset += len(batch)
 
-    _print_status(total, wing_rooms)
+    _print_status(total - bookkeeping, wing_rooms)
+
+
+def _describe_device_or_none() -> Optional[str]:
+    """The embedding device label for status output, or None if it cannot be resolved."""
+    from .embedding import describe_device
+
+    try:
+        return describe_device()
+    except Exception:
+        return None
 
 
 def _print_status(total: int, wing_rooms: dict[str, dict[str, int]]) -> None:
     """Render the wing/room histogram shared by both status code paths."""
     print(f"\n{'=' * 55}")
-    print(f"  MemPalace Status — {total} drawers")
+    print(f"  MemPalace Status -- {total} drawers")
+    device = _describe_device_or_none()
+    if device:
+        print(f"  Device:  {device}")
     print(f"{'=' * 55}\n")
     for wing, rooms in sorted(wing_rooms.items()):
         print(f"  WING: {wing}")
